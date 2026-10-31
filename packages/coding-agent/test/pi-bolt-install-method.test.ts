@@ -4,16 +4,19 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	piBoltExecutableIn,
 	piBoltInstallDir,
 	piBoltInstallerProcess,
 	piBoltInstallMethod,
 	piBoltUpdateEnvironment,
 } from "../src/pi-bolt.ts";
 
+const originalPlatform = process.platform;
 const originalExecPath = process.execPath;
 const originalNpm = process.env.PIBOLT_NPM;
 
 afterEach(() => {
+	Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
 	Object.defineProperty(process, "execPath", { configurable: true, writable: true, value: originalExecPath });
 	if (originalNpm === undefined) delete process.env.PIBOLT_NPM;
 	else process.env.PIBOLT_NPM = originalNpm;
@@ -30,19 +33,36 @@ describe("piBoltInstallMethod", () => {
 		expect(piBoltInstallMethod()).toBe("npm");
 		setExecPath("/Users/me/.pi-bolt/npm/0.7.0/pi-bolt-darwin-arm64/pi");
 		expect(piBoltInstallMethod()).toBe("npm");
-		setExecPath("C:\\Users\\me\\.pi-bolt\\npm\\0.7.0\\pi-bolt-win32-x64\\pi-bolt.exe");
+		setExecPath("C:\\Users\\me\\.pi-bolt\\npm\\0.7.0\\pi-bolt-win32-x64\\pi.exe");
 		expect(piBoltInstallMethod()).toBe("npm");
 		// Windows: the package's install script puts the executable in its own bin folder (npm/install.cjs).
-		setExecPath("C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\pi-bolt\\bin\\pi-bolt.exe");
+		setExecPath("C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\pi-bolt\\bin\\pi.exe");
 		expect(piBoltInstallMethod()).toBe("npm");
+	});
+
+	it("does not treat another npm package's pi.exe as Pi-Bolt's", () => {
+		delete process.env.PIBOLT_NPM;
+		setExecPath("C:\\Users\\me\\node_modules\\other\\bin\\pi.exe");
+		expect(piBoltInstallMethod()).toBe("installer");
 	});
 
 	it("tells an executable the installer put in place", () => {
 		delete process.env.PIBOLT_NPM;
 		setExecPath("/home/me/.pi-bolt/pi-bolt-linux-x64/pi");
 		expect(piBoltInstallMethod()).toBe("installer");
-		setExecPath("C:\\Users\\me\\.pi-bolt\\pi-bolt-win32-x64\\pi-bolt.exe");
+		setExecPath("C:\\Users\\me\\.pi-bolt\\pi-bolt-win32-x64\\pi.exe");
 		expect(piBoltInstallMethod()).toBe("installer");
+	});
+});
+
+describe("piBoltExecutableIn", () => {
+	it("uses pi.exe on Windows and preserves the Unix pi launcher and variant folders", () => {
+		for (const platform of ["win32", "darwin", "linux"]) {
+			Object.defineProperty(process, "platform", { configurable: true, value: platform });
+			expect(piBoltExecutableIn("install")).toBe(
+				join("install", `pi-bolt-${platform}-x64`, platform === "win32" ? "pi.exe" : "pi"),
+			);
+		}
 	});
 });
 
@@ -57,7 +77,7 @@ describe("piBoltUpdateEnvironment", () => {
 
 	it("updates the installation where it is, to the version decided on, from the signed release", () => {
 		const root = process.platform === "win32" ? "D:\\Tools\\Pi" : "/opt/tools/pi";
-		setExecPath(join(root, `pi-bolt-${process.platform}-x64`, process.platform === "win32" ? "pi-bolt.exe" : "pi"));
+		setExecPath(join(root, `pi-bolt-${process.platform}-x64`, process.platform === "win32" ? "pi.exe" : "pi"));
 		process.env.PIBOLT_INSTALL = join(root, "elsewhere");
 		process.env.PIBOLT_DOWNLOAD_BASE = "https://mirror.example";
 		process.env.PIBOLT_SOURCE = "github";
@@ -75,7 +95,7 @@ describe("piBoltUpdateEnvironment", () => {
 	});
 
 	it("falls back to PIBOLT_INSTALL, then ~/.pi-bolt, for an executable outside a variant's folder", () => {
-		setExecPath(process.platform === "win32" ? "C:\\bin\\pi-bolt.exe" : "/usr/local/bin/pi");
+		setExecPath(process.platform === "win32" ? "C:\\bin\\pi.exe" : "/usr/local/bin/pi");
 		delete process.env.PIBOLT_INSTALL;
 		expect(piBoltInstallDir()).toBeUndefined();
 		expect(piBoltUpdateEnvironment("0.8.0").PIBOLT_INSTALL).toBe(join(homedir(), ".pi-bolt"));
@@ -88,13 +108,17 @@ describe("piBoltInstallerProcess", () => {
 		if (process.platform === "win32") {
 			expect(command.toLowerCase()).toMatch(/\\system32\\windowspowershell\\v1\.0\\powershell\.exe$/);
 			expect(args.at(-1)).toBe(
-				"[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; try { $installer = irm https://pi-bolt.opensec.in/install.ps1 -ErrorAction Stop } catch { Write-Error $_; exit 1 }; iex $installer; exit $LASTEXITCODE",
+				"[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; try { $installer = irm https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.ps1 -ErrorAction Stop } catch { Write-Error $_; exit 1 }; iex $installer; exit $LASTEXITCODE",
 			);
 		} else {
 			expect(command).toBe("sh");
 			expect(args[0]).toBe("-c");
-			expect(args[1]).toContain("curl -fsSL https://pi-bolt.opensec.in/install.sh");
-			expect(args[1]).toContain("wget -qO- https://pi-bolt.opensec.in/install.sh");
+			expect(args[1]).toContain(
+				"curl -fsSL https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh",
+			);
+			expect(args[1]).toContain(
+				"wget -qO- https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh",
+			);
 		}
 	});
 

@@ -1,29 +1,27 @@
 // The Windows update without PowerShell (#82): what it checks and how it puts the new build in place.
 import { generateKeyPairSync, sign } from "node:crypto";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import * as fs from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	installFiles,
 	isInProfile,
 	keepPrevious,
+	releaseDownloadBase,
 	sha256,
 	sumsEntry,
 	sumsSignatureValid,
 	sumsVersion,
 	tgzEntry,
 } from "../src/pi-bolt-update-windows.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const original = await importOriginal<typeof fs>();
+	return { ...original, renameSync: vi.fn(original.renameSync) };
+});
 
 let dir: string;
 
@@ -75,6 +73,12 @@ describe("isInProfile", () => {
 	});
 });
 
+describe("releaseDownloadBase", () => {
+	test("downloads application releases only from the fork", () => {
+		expect(releaseDownloadBase("1.0.8")).toBe("https://github.com/saifymatteo/Pi-Bolt/releases/download/bolt-v1.0.8");
+	});
+});
+
 describe("the signed checksums", () => {
 	const sums =
 		"# pi-bolt 0.9.7\nabc\n" +
@@ -118,16 +122,18 @@ describe("installFiles", () => {
 		const from = join(dir, "new"),
 			to = join(dir, "pi-bolt-win32-x64");
 		mkdirSync(join(from, "theme"), { recursive: true });
-		writeFileSync(join(from, "pi-bolt.exe"), "new exe");
+		writeFileSync(join(from, "pi.exe"), "new exe");
 		writeFileSync(join(from, "theme", "dark.json"), "new theme");
 		writeFileSync(join(from, "added.txt"), "added");
 		mkdirSync(join(to, "theme"), { recursive: true });
-		writeFileSync(join(to, "pi-bolt.exe"), "old exe");
+		writeFileSync(join(to, "pi.exe"), "old exe");
 		writeFileSync(join(to, "theme", "dark.json"), "old theme");
 		writeFileSync(join(to, "compiled.json"), "kept");
-		writeFileSync(join(to, "pi-bolt.exe.1.pibolt-old"), "left over by an earlier update");
+		writeFileSync(join(to, "pi.exe.1.pibolt-old"), "left over by an earlier update");
+		vi.mocked(fs.renameSync).mockClear();
 		installFiles(from, to, 2);
-		expect(readFileSync(join(to, "pi-bolt.exe"), "utf8")).toBe("new exe");
+		expect(vi.mocked(fs.renameSync).mock.calls.at(-1)?.[1]).toBe(join(to, "pi.exe"));
+		expect(readFileSync(join(to, "pi.exe"), "utf8")).toBe("new exe");
 		expect(readFileSync(join(to, "theme", "dark.json"), "utf8")).toBe("new theme");
 		expect(readFileSync(join(to, "added.txt"), "utf8")).toBe("added");
 		expect(readFileSync(join(to, "compiled.json"), "utf8")).toBe("kept");
@@ -137,16 +143,18 @@ describe("installFiles", () => {
 		const from = join(dir, "new"),
 			to = join(dir, "pi-bolt-win32-x64");
 		mkdirSync(from, { recursive: true });
-		writeFileSync(join(from, "pi-bolt.exe"), "new exe");
+		writeFileSync(join(from, "pi.exe"), "new exe");
 		mkdirSync(to, { recursive: true });
-		writeFileSync(join(to, "pi-bolt.exe"), "old exe");
-		// A folder nothing may be written to: the new file cannot be moved in, and the old one stays.
-		chmodSync(to, 0o555);
+		writeFileSync(join(to, "pi.exe"), "old exe");
+		// Simulate a denied rename: chmod does not make a folder unwritable on Windows.
+		const rename = vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+			throw new Error("write denied");
+		});
 		try {
-			expect(() => installFiles(from, to, 3)).toThrow(/could not put .*pi-bolt\.exe in place/);
-			expect(readFileSync(join(to, "pi-bolt.exe"), "utf8")).toBe("old exe");
+			expect(() => installFiles(from, to, 3)).toThrow(/could not put .*pi\.exe in place/);
+			expect(readFileSync(join(to, "pi.exe"), "utf8")).toBe("old exe");
 		} finally {
-			chmodSync(to, 0o755);
+			rename.mockClear();
 		}
 	});
 });
@@ -154,18 +162,18 @@ describe("installFiles", () => {
 describe("keepPrevious", () => {
 	const build = (folder: string, version: string) => {
 		mkdirSync(folder, { recursive: true });
-		writeFileSync(join(folder, "pi-bolt.exe"), `exe ${version}`);
+		writeFileSync(join(folder, "pi.exe"), `exe ${version}`);
 		writeFileSync(join(folder, "pi-bolt.txt"), `Pi-Bolt ${version} (Pi 1.3.0), win32-x64, JIT off\n`);
 	};
 	test("keeps the build an update replaces as <folder>.previous, without what was renamed aside", () => {
 		const current = join(dir, "pi-bolt-win32-x64"),
 			incoming = join(dir, "new");
 		build(current, "0.9.6");
-		writeFileSync(join(current, "pi-bolt.exe.5.pibolt-old"), "aside");
+		writeFileSync(join(current, "pi.exe.5.pibolt-old"), "aside");
 		build(incoming, "0.9.7");
 		keepPrevious(current, incoming);
-		expect(readFileSync(join(`${current}.previous`, "pi-bolt.exe"), "utf8")).toBe("exe 0.9.6");
-		expect(existsSync(join(`${current}.previous`, "pi-bolt.exe.5.pibolt-old"))).toBe(false);
+		expect(readFileSync(join(`${current}.previous`, "pi.exe"), "utf8")).toBe("exe 0.9.6");
+		expect(existsSync(join(`${current}.previous`, "pi.exe.5.pibolt-old"))).toBe(false);
 	});
 	test("not when the same build is installed again, nor when there is none", () => {
 		const current = join(dir, "pi-bolt-win32-x64"),

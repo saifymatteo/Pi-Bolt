@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import * as herdrCompatibility from "../src/herdr-pi-compat.ts";
 import { main } from "../src/main.ts";
 import { getPiBoltPackageFlagError, handleConfigCommand, handlePackageCommand } from "../src/package-manager-cli.ts";
 
@@ -30,60 +29,11 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("private Herdr runtime preflight", () => {
-	beforeEach(() => {
-		build.piBolt = true;
-		vi.spyOn(herdrCompatibility, "isHerdrPiCompatibilityProcess").mockReturnValue(true);
-	});
-
-	test.each([
-		["update"],
-		["update", "self"],
-		["update", "pi"],
-		["update", "--all"],
-		["update", "--self"],
-		["update", "--rollback"],
-		["update", "--extensions", "--channel", "beta"],
-		["compile"],
-	])("rejects installation changes before settings or handlers: %j", async (...args) => {
-		expect(getPiBoltPackageFlagError(args)).toContain("original installation");
-		await main(args);
-		expect(process.exitCode).toBe(1);
-		expect(SettingsManager.create).not.toHaveBeenCalled();
-		process.exitCode = undefined;
-		expect(await handlePackageCommand(args)).toBe(true);
-		expect(process.exitCode).toBe(1);
-		expect(SettingsManager.create).not.toHaveBeenCalled();
-	});
-
-	test.each([
-		["update", "--extensions"],
-		["update", "npm:fixture"],
-		["update", "--models"],
-		["update", "--help"],
-		["install", "npm:fixture"],
-		["remove", "npm:fixture"],
-		["list"],
-		["config"],
-	])("does not block non-installation actions: %j", (...args) => {
-		expect(getPiBoltPackageFlagError(args)).toBeUndefined();
-	});
-
-	test("rejects malformed compatibility flags before launching or reading settings", async () => {
-		const launch = vi.spyOn(herdrCompatibility, "launchHerdrPiCompatibility");
-		await main(["--herdr-as-pi=false"]);
-		expect(process.exitCode).toBe(1);
-		expect(launch).not.toHaveBeenCalled();
-		expect(SettingsManager.create).not.toHaveBeenCalled();
-	});
-
-	test("returns from the waiting parent before reading settings", async () => {
-		vi.spyOn(herdrCompatibility, "isHerdrPiCompatibilityProcess").mockReturnValue(false);
-		vi.spyOn(herdrCompatibility, "launchHerdrPiCompatibility").mockResolvedValue(17);
-		await main(["--herdr-as-pi", "--session", "session with spaces.jsonl"]);
-		expect(process.exitCode).toBe(17);
-		expect(SettingsManager.create).not.toHaveBeenCalled();
-	});
+test.each(["--herdr-as-pi", "--herdr-as-pi=false"])("%s is no longer a core startup option", (arg) => {
+	const parsed = parseArgs([arg, "--version"]);
+	expect(parsed).not.toHaveProperty("herdrAsPi");
+	expect(parsed.unknownFlags.has("herdr-as-pi")).toBe(true);
+	expect(parsed.version).toBe(true);
 });
 
 // #28: package selector preflight must reuse startup argument consumption, not scan option values.

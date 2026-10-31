@@ -82,7 +82,7 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 		runningFrom("/home/me/.local/share/mise/installs/pi-bolt/1.0.0/pi-bin");
 		expect(piBoltInstallMethod()).toBe("mise");
 		expect(piBoltMiseTool()).toBe("pi-bolt");
-		runningFrom("C:\\Users\\me\\AppData\\Local\\mise\\installs\\github-opensec-git-pi-bolt\\1.0.0\\pi-bolt.exe");
+		runningFrom("C:\\Users\\me\\AppData\\Local\\mise\\installs\\github-opensec-git-pi-bolt\\1.0.0\\pi.exe");
 		expect(piBoltInstallMethod()).toBe("mise");
 		// Another tool of mise's, and the installer's folder, are not.
 		runningFrom("/home/me/.local/share/mise/installs/node/24.0.0/bin/node");
@@ -92,7 +92,7 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 		runningFrom(join(version, "pi-bin"));
 		expect(piBoltUpdateCommand("mise")).toBe(`mise upgrade --bump ${GITHUB_TOOL}`);
 		expect(piBoltJitSwitchCommand("mise", "darwin", "arm64-jit")).toBe(
-			`mise unuse -g ${GITHUB_TOOL} && curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=arm64-jit sh`,
+			`mise unuse -g ${GITHUB_TOOL} && curl -fsSL https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=arm64-jit sh`,
 		);
 	});
 

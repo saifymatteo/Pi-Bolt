@@ -14,7 +14,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PIBOLT, piBoltJitSwitchCommand } from "../../pi-bolt.ts";
 
 /** The engine's message (patches/bun.patch): a TypeError from the bun:ffi functions that make native code. */
@@ -82,9 +83,9 @@ function stackFiles(stack: string): string[] {
 		const match = /^\s*at (?:.*? \()?(.+?):\d+:\d+\)?\s*$/.exec(line);
 		if (!match) continue;
 		let file = match[1];
-		if (file.startsWith("file://")) file = decodeURIComponent(new URL(file).pathname);
+		if (file.startsWith("file://")) file = fileURLToPath(file);
 		if (!isAbsolute(file) || file.includes("/$bunfs/") || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(file)) continue;
-		files.push(file);
+		files.push(normalize(file));
 	}
 	return files;
 }

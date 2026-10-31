@@ -1,5 +1,5 @@
 /**
- * Pi-Bolt: Pi compiled ahead of time (https://github.com/opensec-git/Pi-Bolt).
+ * Pi-Bolt: Pi compiled ahead of time (https://github.com/saifymatteo/Pi-Bolt).
  *
  * scripts/build-pi.sh defines PIBOLT_BUILD when it compiles this tree ("0.3.1 x64 jit-off e0f307e3d3f66944": the Pi-Bolt
  * version, the CPU variant (x64, x64-baseline, x64-jit, arm64), whether the JIT is on, and the runtime stamp of the engine it
@@ -24,7 +24,9 @@ export const PIBOLT: PiBoltBuild | undefined = parsePiBoltBuild(
 );
 
 export const PIBOLT_INSTALL_URL =
-	process.platform === "win32" ? "https://pi-bolt.opensec.in/install.ps1" : "https://pi-bolt.opensec.in/install.sh";
+	process.platform === "win32"
+		? "https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.ps1"
+		: "https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh";
 // TLS 1.2 before the first download: Windows PowerShell 5.1 on an older Windows 10 offers only TLS 1.0 by default, which the
 // site refuses, and the installer turns it on only once it is running. Only for the update's own process: the command shown to
 // users is the plain one (README), which Windows' antivirus does not mistake for a downloader.
@@ -37,7 +39,7 @@ export const PIBOLT_INSTALL_COMMAND =
 /**
  * The installer as a command to spawn (with piBoltUpdateEnvironment()): it exits non-zero if it did not install. With
  * `installerFile`, the release's installer already checked against its signed checksums (pi-bolt-installer.ts) is run from that
- * file; without it, the one the site serves is downloaded and run (a release up to 1.0.1 does not list its installer).
+ * file; without it, the latest release's installer is downloaded and run (a release up to 1.0.1 does not list its installer).
  */
 export function piBoltInstallerProcess(installerFile?: string): { command: string; args: string[] } {
 	if (process.platform === "win32") {
@@ -85,7 +87,7 @@ export function piBoltInstallerProcess(installerFile?: string): { command: strin
 		],
 	};
 }
-export const PIBOLT_RELEASES_URL = "https://github.com/opensec-git/Pi-Bolt/releases";
+export const PIBOLT_RELEASES_URL = "https://github.com/saifymatteo/Pi-Bolt/releases";
 /** The key releases' SHA256SUMS are signed with (keys/release.pub; the installers carry it too). */
 export const PIBOLT_RELEASE_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=
@@ -95,9 +97,9 @@ MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=
 export const PIBOLT_LATEST_RELEASE_URL = `${PIBOLT_RELEASES_URL}/latest`;
 /** The releases, pre-releases among them, as an Atom feed; not counted against GitHub's API limit either. */
 export const PIBOLT_RELEASES_FEED = `${PIBOLT_RELEASES_URL}.atom`;
-export const PIBOLT_LATEST_RELEASE_API = "https://api.github.com/repos/opensec-git/Pi-Bolt/releases/latest";
+export const PIBOLT_LATEST_RELEASE_API = "https://api.github.com/repos/saifymatteo/Pi-Bolt/releases/latest";
 /** The releases, newest first, pre-releases among them (drafts are not shown to anyone without write access). */
-export const PIBOLT_RELEASES_API = "https://api.github.com/repos/opensec-git/Pi-Bolt/releases?per_page=30";
+export const PIBOLT_RELEASES_API = "https://api.github.com/repos/saifymatteo/Pi-Bolt/releases?per_page=30";
 
 /**
  * Which releases `pi-bolt update` takes: `stable`, the latest release; or `beta`, the newest one, pre-releases included (a
@@ -209,7 +211,7 @@ export function piBoltInstallMethod(): PiBoltInstallMethod {
 	if (process.env.PIBOLT_NPM === "1") return "npm";
 	const execPath = process.execPath;
 	if (/[\\/]npm[\\/]\d+\.\d+\.\d+[\\/]pi-bolt-(linux|darwin|win32)-/.test(execPath)) return "npm";
-	if (/[\\/]node_modules[\\/]pi-bolt[\\/]bin[\\/]pi-bolt\.exe$/i.test(execPath)) return "npm";
+	if (/[\\/]node_modules[\\/]pi-bolt[\\/]bin[\\/]pi\.exe$/i.test(execPath)) return "npm";
 	const realPath = realPathOf(execPath);
 	if (/[\\/]Cellar[\\/]pi-bolt[\\/]/.test(realPath)) return "homebrew";
 	if (isScoopPath(realPath)) return "scoop";
@@ -278,7 +280,7 @@ export function piBoltUpdateCommand(method: PiBoltInstallMethod = piBoltInstallM
 
 /**
  * Where this installation is: the folder that holds its variant's folder (~/.pi-bolt/pi-bolt-linux-x64/pi, or
- * pi-bolt-darwin-arm64/pi-bin, pi-bolt-win32-x64\pi-bolt.exe -> ~/.pi-bolt), wherever that is (~/.pi-bolt, /opt/pi-bolt);
+ * pi-bolt-darwin-arm64/pi-bin, pi-bolt-win32-x64\pi.exe -> ~/.pi-bolt), wherever that is (~/.pi-bolt, /opt/pi-bolt);
  * undefined for an executable that is not in one (a build run from its output folder).
  */
 export function piBoltInstallDir(): string | undefined {
@@ -350,15 +352,15 @@ export function piBoltJitSwitchCommand(
 	// Windows PowerShell 5.1 has no &&.)
 	const manager = piBoltPackageManager(method);
 	if (platform === "win32") {
-		const installer = `$env:PIBOLT_VARIANT = "${variant}"; irm https://pi-bolt.opensec.in/install.ps1 | iex`;
+		const installer = `$env:PIBOLT_VARIANT = "${variant}"; irm https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.ps1 | iex`;
 		return manager ? `${manager.uninstall}; ${installer}` : installer;
 	}
-	const installer = `curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=${variant} sh`;
+	const installer = `curl -fsSL https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=${variant} sh`;
 	return manager ? `${manager.uninstall} && ${installer}` : installer;
 }
 
 /** The executable the installer puts in `installDir` for this variant (on macOS, the launcher that starts pi-bin). */
 export function piBoltExecutableIn(installDir: string): string {
 	const folder = `pi-bolt-${process.platform}-${PIBOLT?.variant ?? "x64"}`;
-	return join(installDir, folder, process.platform === "win32" ? "pi-bolt.exe" : "pi");
+	return join(installDir, folder, process.platform === "win32" ? "pi.exe" : "pi");
 }

@@ -1,20 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as childProcess from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { COMMAND_NAME } from "../src/config.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
-import { createHerdrExtension, quietOtherHerdrReporters, resumeArgv } from "../src/extensions/herdr/index.ts";
+import { createHerdrExtension, quietOtherHerdrReporters } from "../src/extensions/herdr/index.ts";
 import { isHerdrPiIntegration } from "../src/extensions/herdr/integration-file.ts";
 import { type HerdrRequest, herdrAnswer, herdrArguments, socketTransport } from "../src/extensions/herdr/transport.ts";
-import { HERDR_PI_COMPAT_FLAG } from "../src/herdr-pi-compat.ts";
 
-// Exercise the reporter independently of the Windows launcher and its private child-process marker.
-vi.mock("../src/herdr-pi-compat.ts", () => ({
-	HERDR_PI_COMPAT_FLAG: "--herdr-as-pi",
-	isHerdrPiCompatibilityProcess: (env: NodeJS.ProcessEnv = process.env) => env.TEST_HERDR_PI_COMPAT === "1",
-}));
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<object>()) }));
 
 type Request = { id: string; method: string; params: Record<string, unknown> };
 
@@ -22,6 +17,7 @@ const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	delete (globalThis as { PIBOLT_BUILD?: string }).PIBOLT_BUILD;
+	vi.restoreAllMocks();
 	vi.resetModules();
 });
 
@@ -115,7 +111,6 @@ async function startedInHerdr(
 	options: {
 		mode?: string;
 		sessionFile?: string;
-		compatibility?: boolean;
 		answer?: (request: Request) => Record<string, unknown> | Promise<Record<string, unknown>>;
 	} = {},
 ) {
@@ -124,7 +119,6 @@ async function startedInHerdr(
 		HERDR_ENV: "1",
 		HERDR_SOCKET_PATH: herdr.socketPath,
 		HERDR_PANE_ID: "w1:p2",
-		TEST_HERDR_PI_COMPAT: options.compatibility ? "1" : undefined,
 	};
 	const fake = fakePi();
 	let idle = true;
@@ -152,16 +146,15 @@ describe("Herdr extension", () => {
 		expect(fake.handlers.size).toBe(0);
 	});
 
-	test.each([false, true])("reports session and state changes (compatibility=%s)", async (compatibility) => {
-		const run = await startedInHerdr({ compatibility });
+	test("reports session and state changes", async () => {
+		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
 		expect(run.stateRequests()[0].params).toMatchObject({
 			pane_id: "w1:p2",
-			source: compatibility ? "herdr:pi" : "pi-bolt",
-			agent: compatibility ? "pi" : "pi-bolt",
+			source: "herdr:pi",
+			agent: "pi",
 			state: "idle",
 			agent_session_path: "/work/s.jsonl",
-			resume_argv: [COMMAND_NAME, ...(compatibility ? [HERDR_PI_COMPAT_FLAG] : []), "--session", "/work/s.jsonl"],
 		});
 
 		run.setIdle(false);
@@ -177,9 +170,10 @@ describe("Herdr extension", () => {
 		await until(() => run.states().length === 5);
 		expect(run.states()).toEqual(["idle", "working", "blocked", "working", "idle"]);
 		for (const request of run.herdr.requests) {
+			expect(request.params).not.toHaveProperty("resume_argv");
 			expect(request.params).toMatchObject({
-				source: compatibility ? "herdr:pi" : "pi-bolt",
-				agent: compatibility ? "pi" : "pi-bolt",
+				source: "herdr:pi",
+				agent: "pi",
 				agent_session_path: "/work/s.jsonl",
 			});
 			expect(request.params).not.toHaveProperty("agent_session_id");
@@ -190,36 +184,30 @@ describe("Herdr extension", () => {
 		expect(new Set(seqs).size).toBe(seqs.length);
 	});
 
-	test.each([false, true])(
-		"registers the canonical Pi session before idle only in compatibility mode (%s)",
-		async (compatibility) => {
-			const sessionFile = join(tempDir(), "session with spaces.jsonl");
-			const run = await startedInHerdr({ compatibility, sessionFile });
-			await until(() => run.states().length === 1);
-			expect(run.herdr.requests.map((request) => request.method)).toEqual([
-				...(compatibility ? ["pane.report_agent_session"] : []),
-				"pane.report_agent",
-			]);
-			if (compatibility) {
-				const registration = run.herdr.requests[0];
-				expect(registration.params).toEqual({
-					pane_id: "w1:p2",
-					source: "herdr:pi",
-					agent: "pi",
-					seq: expect.any(Number),
-					session_start_source: "startup",
-					agent_session_path: sessionFile,
-				});
-				expect(registration.params).not.toHaveProperty("resume_argv");
-				expect(run.stateRequests()[0].params.seq).toBe((registration.params.seq as number) + 1);
-			}
-			expect(run.stateRequests()[0].params).toMatchObject({
-				state: "idle",
-				agent_session_path: sessionFile,
-				resume_argv: [COMMAND_NAME, ...(compatibility ? [HERDR_PI_COMPAT_FLAG] : []), "--session", sessionFile],
-			});
-		},
-	);
+	test("registers the canonical Pi session before idle", async () => {
+		const sessionFile = join(tempDir(), "session with spaces.jsonl");
+		const run = await startedInHerdr({ sessionFile });
+		await until(() => run.states().length === 1);
+		expect(run.herdr.requests.map((request) => request.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent",
+		]);
+		const registration = run.herdr.requests[0];
+		expect(registration.params).toEqual({
+			pane_id: "w1:p2",
+			source: "herdr:pi",
+			agent: "pi",
+			seq: expect.any(Number),
+			session_start_source: "startup",
+			agent_session_path: sessionFile,
+		});
+		expect(registration.params).not.toHaveProperty("resume_argv");
+		expect(run.stateRequests()[0].params.seq).toBe((registration.params.seq as number) + 1);
+		expect(run.stateRequests()[0].params).toMatchObject({
+			state: "idle",
+			agent_session_path: sessionFile,
+		});
+	});
 
 	test.each([undefined, "relative.jsonl"])(
 		"registers the fallback session ID without an absolute path (%s)",
@@ -230,7 +218,6 @@ describe("Herdr extension", () => {
 				HERDR_ENV: "1",
 				HERDR_SOCKET_PATH: herdr.socketPath,
 				HERDR_PANE_ID: "w1:p2",
-				TEST_HERDR_PI_COMPAT: "1",
 			})(fake.pi);
 			await fake.fire("session_start", { reason: "startup" }, context({ sessionFile }));
 			await until(() => herdr.requests.some((request) => request.method === "pane.report_agent"));
@@ -250,7 +237,6 @@ describe("Herdr extension", () => {
 			expect(herdr.requests[1].params).toMatchObject({
 				state: "idle",
 				agent_session_id: "session-id",
-				resume_argv: [COMMAND_NAME, HERDR_PI_COMPAT_FLAG, "--resume"],
 				seq: (herdr.requests[0].params.seq as number) + 1,
 			});
 			expect(herdr.requests[1].params).not.toHaveProperty("agent_session_path");
@@ -264,7 +250,6 @@ describe("Herdr extension", () => {
 			HERDR_ENV: "1",
 			HERDR_SOCKET_PATH: herdr.socketPath,
 			HERDR_PANE_ID: "w1:p2",
-			TEST_HERDR_PI_COMPAT: "1",
 		})(fake.pi);
 		let completed = false;
 		const starting = fake
@@ -354,9 +339,9 @@ describe("Herdr extension", () => {
 		expect(run.states()).toEqual(["idle", "working", "idle", "working", "idle"]);
 	});
 
-	test.each([false, true])("non-TUI sessions do not report (compatibility=%s)", async (compatibility) => {
+	test("non-TUI sessions do not report", async () => {
 		for (const mode of ["print", "json", "rpc", "subagent"]) {
-			const run = await startedInHerdr({ mode, compatibility });
+			const run = await startedInHerdr({ mode });
 			await run.fire("agent_start", { type: "agent_start" }, run.ctx);
 			await run.fire("ui_prompt_start", {});
 			run.emit("herdr:blocked", { active: true });
@@ -368,21 +353,18 @@ describe("Herdr extension", () => {
 		}
 	});
 
-	test.each([false, true])("releases the pane on quit only (compatibility=%s)", async (compatibility) => {
-		const run = await startedInHerdr({ compatibility });
+	test("releases the pane on quit only", async () => {
+		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
 		await run.fire("session_shutdown", { type: "session_shutdown", reason: "new" });
-		expect(run.herdr.requests.map((r) => r.method)).toEqual([
-			...(compatibility ? ["pane.report_agent_session"] : []),
-			"pane.report_agent",
-		]);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent_session", "pane.report_agent"]);
 
-		const quitting = await startedInHerdr({ compatibility });
+		const quitting = await startedInHerdr();
 		await until(() => quitting.states().length === 1);
 		await quitting.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		await until(() => quitting.herdr.requests.length === (compatibility ? 3 : 2));
+		await until(() => quitting.herdr.requests.length === 3);
 		expect(quitting.herdr.requests.map((r) => r.method)).toEqual([
-			...(compatibility ? ["pane.report_agent_session"] : []),
+			"pane.report_agent_session",
 			"pane.report_agent",
 			"pane.release_agent",
 		]);
@@ -390,88 +372,65 @@ describe("Herdr extension", () => {
 			method: "pane.release_agent",
 			params: {
 				pane_id: "w1:p2",
-				source: compatibility ? "herdr:pi" : "pi-bolt",
-				agent: compatibility ? "pi" : "pi-bolt",
+				source: "herdr:pi",
+				agent: "pi",
 			},
 		});
 	});
 
-	test.each([false, true])(
-		"switches session metadata without releasing the pane (compatibility=%s)",
-		async (compatibility) => {
-			const run = await startedInHerdr({ compatibility, sessionFile: "/work/first.jsonl" });
-			await until(() => run.states().length === 1);
-			for (const [index, reason] of ["new", "resume", "fork", "reload"].entries()) {
-				await run.fire("session_shutdown", { reason });
-				const sessionFile = `/work/${reason}.jsonl`;
-				await run.fire("session_start", { reason }, context({ sessionFile }));
-				await until(() => run.states().length === index + 2);
-				expect(run.stateRequests()[index + 1]).toMatchObject({
-					method: "pane.report_agent",
-					params: {
-						source: compatibility ? "herdr:pi" : "pi-bolt",
-						agent: compatibility ? "pi" : "pi-bolt",
-						agent_session_path: sessionFile,
-						resume_argv: [
-							COMMAND_NAME,
-							...(compatibility ? [HERDR_PI_COMPAT_FLAG] : []),
-							"--session",
-							sessionFile,
-						],
-					},
-				});
-			}
-			expect(run.herdr.requests.map((request) => request.method)).toEqual(
-				["startup", "new", "resume", "fork", "reload"].flatMap(() => [
-					...(compatibility ? ["pane.report_agent_session"] : []),
-					"pane.report_agent",
-				]),
-			);
-			if (compatibility) {
-				const registrations = run.herdr.requests.filter(
-					(request) => request.method === "pane.report_agent_session",
-				);
-				for (const [index, reason] of ["startup", "new", "resume", "fork", "reload"].entries()) {
-					expect(registrations[index].params).toMatchObject({
-						pane_id: "w1:p2",
-						source: "herdr:pi",
-						agent: "pi",
-						session_start_source: reason,
-						agent_session_path: `/work/${reason === "startup" ? "first" : reason}.jsonl`,
-					});
-					expect(registrations[index].params).not.toHaveProperty("resume_argv");
-				}
-			}
-			const seqs = run.herdr.requests.map((request) => request.params.seq as number);
-			expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
-			expect(new Set(seqs).size).toBe(seqs.length);
-		},
-	);
-
-	test.each([false, true])("preserves metadata when resume is invalid (compatibility=%s)", async (compatibility) => {
-		const run = await startedInHerdr({ compatibility });
+	test("switches session metadata without releasing the pane", async () => {
+		const run = await startedInHerdr({ sessionFile: "/work/first.jsonl" });
 		await until(() => run.states().length === 1);
-		for (const [index, sessionFile] of [
-			undefined,
-			"relative.jsonl",
-			"/o'brien/s.jsonl",
-			"/a\u0085b",
-			`/${"é".repeat(4100)}`,
-		].entries()) {
+		for (const [index, reason] of ["new", "resume", "fork", "reload"].entries()) {
+			await run.fire("session_shutdown", { reason });
+			const sessionFile = `/work/${reason}.jsonl`;
+			await run.fire("session_start", { reason }, context({ sessionFile }));
+			await until(() => run.states().length === index + 2);
+			expect(run.stateRequests()[index + 1]).toMatchObject({
+				method: "pane.report_agent",
+				params: {
+					source: "herdr:pi",
+					agent: "pi",
+					agent_session_path: sessionFile,
+				},
+			});
+		}
+		expect(run.herdr.requests.map((request) => request.method)).toEqual(
+			["startup", "new", "resume", "fork", "reload"].flatMap(() => [
+				"pane.report_agent_session",
+				"pane.report_agent",
+			]),
+		);
+		const registrations = run.herdr.requests.filter((request) => request.method === "pane.report_agent_session");
+		for (const [index, reason] of ["startup", "new", "resume", "fork", "reload"].entries()) {
+			expect(registrations[index].params).toMatchObject({
+				pane_id: "w1:p2",
+				source: "herdr:pi",
+				agent: "pi",
+				session_start_source: reason,
+				agent_session_path: `/work/${reason === "startup" ? "first" : reason}.jsonl`,
+			});
+			expect(registrations[index].params).not.toHaveProperty("resume_argv");
+		}
+		const seqs = run.herdr.requests.map((request) => request.params.seq as number);
+		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
+		expect(new Set(seqs).size).toBe(seqs.length);
+	});
+
+	test("preserves session metadata without a custom resume command", async () => {
+		const run = await startedInHerdr();
+		await until(() => run.states().length === 1);
+		for (const [index, sessionFile] of [undefined, "relative.jsonl", "/o'brien/s.jsonl", "/work/é.jsonl"].entries()) {
 			await run.fire("session_shutdown", { reason: "resume" });
 			await run.fire("session_start", { reason: "resume" }, context({ sessionFile }));
 			await until(() => run.states().length === index + 2);
 			const params = run.stateRequests()[index + 1].params;
 			expect(params).toMatchObject({
-				source: compatibility ? "herdr:pi" : "pi-bolt",
-				agent: compatibility ? "pi" : "pi-bolt",
+				source: "herdr:pi",
+				agent: "pi",
 				state: "idle",
 			});
-			if (compatibility) {
-				expect(params.resume_argv).toEqual([COMMAND_NAME, HERDR_PI_COMPAT_FLAG, "--resume"]);
-			} else {
-				expect(params).not.toHaveProperty("resume_argv");
-			}
+			expect(params).not.toHaveProperty("resume_argv");
 			if (sessionFile?.startsWith("/")) {
 				expect(params.agent_session_path).toBe(sessionFile);
 				expect(params).not.toHaveProperty("agent_session_id");
@@ -504,7 +463,7 @@ describe("Herdr extension", () => {
 		// Each try has its own seq, and nothing is retried until something publishes again.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(run.states()).toEqual(["idle", "idle"]);
-		const [first, second] = run.herdr.requests.map((r) => r.params.seq as number);
+		const [first, second] = run.stateRequests().map((r) => r.params.seq as number);
 		expect(second).toBeGreaterThan(first);
 
 		refuse = false;
@@ -525,6 +484,7 @@ describe("Herdr extension", () => {
 		const run = await startedInHerdr({
 			// The first report is refused only once the release is in.
 			answer: (request) => {
+				if (request.method === "pane.report_agent_session") return { result: {} };
 				if (request.method === "pane.release_agent") {
 					setTimeout(() => releaseArrived?.(), 0);
 					return { result: {} };
@@ -534,48 +494,72 @@ describe("Herdr extension", () => {
 				});
 			},
 		});
-		await until(() => run.herdr.requests.length === 1);
+		await until(() => run.states().length === 1);
 		await run.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent", "pane.release_agent"]);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent",
+			"pane.release_agent",
+		]);
 	});
 
-	test.each([false, true])("suppresses competing reporters only in Herdr (compatibility=%s)", (compatibility) => {
+	test("registration retries use fresh sequences before reporting state", async () => {
+		let registrations = 0;
+		const run = await startedInHerdr({
+			answer: (request) => {
+				if (request.method === "pane.report_agent_session" && ++registrations === 1) {
+					return { error: { code: "not_ready" } };
+				}
+				return { result: {} };
+			},
+		});
+		await until(() => run.states().length === 1);
+		expect(run.herdr.requests.map((request) => request.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent_session",
+			"pane.report_agent",
+		]);
+		const seqs = run.herdr.requests.map((request) => request.params.seq as number);
+		expect(seqs[1]).toBe(seqs[0] + 1);
+		expect(seqs[2]).toBe(seqs[1] + 1);
+	});
+
+	test("a registration refused after quit cannot retry or report state", async () => {
+		let refuseRegistration: (() => void) | undefined;
+		const herdr = await fakeHerdr((request) => {
+			if (request.method === "pane.release_agent") {
+				refuseRegistration?.();
+				return { result: {} };
+			}
+			return new Promise((resolve) => {
+				refuseRegistration = () => resolve({ error: { code: "not_ready" } });
+			});
+		});
+		const fake = fakePi();
+		createHerdrExtension({ HERDR_ENV: "1", HERDR_SOCKET_PATH: herdr.socketPath, HERDR_PANE_ID: "w1:p2" })(fake.pi);
+		const starting = fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/work/s.jsonl" }));
+		await until(() => herdr.requests.length === 1);
+		await fake.fire("session_shutdown", { reason: "quit" });
+		await starting;
+		expect(herdr.requests.map((request) => request.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.release_agent",
+		]);
+		expect(herdr.requests[1].params.seq).toBe((herdr.requests[0].params.seq as number) + 1);
+	});
+
+	test("suppresses competing reporters only in Herdr", () => {
 		const inHerdr: NodeJS.ProcessEnv = {
 			HERDR_ENV: "1",
 			HERDR_SOCKET_PATH: "/tmp/h.sock",
 			HERDR_PANE_ID: "w1:p1",
-			TEST_HERDR_PI_COMPAT: compatibility ? "1" : undefined,
 		};
 		quietOtherHerdrReporters(inHerdr);
 		expect(inHerdr.PI_HERDR_NO_SELF_REPORT).toBe("1");
 		const outside: NodeJS.ProcessEnv = {};
 		quietOtherHerdrReporters(outside);
 		expect(outside.PI_HERDR_NO_SELF_REPORT).toBeUndefined();
-	});
-
-	test.each([false, true])("validates resume commands in bytes (compatibility=%s)", (compatibility) => {
-		const prefix = [COMMAND_NAME, ...(compatibility ? [HERDR_PI_COMPAT_FLAG] : []), "--session"];
-		expect(resumeArgv("/home/me/s.jsonl", compatibility)).toEqual([...prefix, "/home/me/s.jsonl"]);
-		for (const file of [
-			undefined,
-			"relative.jsonl",
-			"/home/o'brien/s.jsonl",
-			"/a\nb",
-			"/a\u0000b",
-			"/a\u007fb",
-			"/a\u0085b",
-		]) {
-			expect(resumeArgv(file, compatibility)).toBeUndefined();
-		}
-		const remainingBytes = 8192 - prefix.reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0);
-		const atLimit = `/${"a".repeat(remainingBytes - 1)}`;
-		expect(resumeArgv(atLimit, compatibility)).toEqual([...prefix, atLimit]);
-		expect(resumeArgv(`${atLimit}a`, compatibility)).toBeUndefined();
-		const unicodeAtLimit = `/${"é".repeat(Math.floor((remainingBytes - 1) / 2))}${remainingBytes % 2 === 0 ? "a" : ""}`;
-		expect(Buffer.byteLength(unicodeAtLimit)).toBe(remainingBytes);
-		expect(resumeArgv(unicodeAtLimit, compatibility)).toEqual([...prefix, unicodeAtLimit]);
-		expect(resumeArgv(`${unicodeAtLimit}é`, compatibility)).toBeUndefined();
 	});
 });
 
@@ -605,7 +589,7 @@ describe("Herdr socket", () => {
 
 	const report: HerdrRequest = {
 		method: "pane.report_agent",
-		params: { pane_id: "w1:p1", source: "pi-bolt", agent: "pi-bolt", state: "idle", seq: 1 },
+		params: { pane_id: "w1:p1", source: "herdr:pi", agent: "pi", state: "idle", seq: 1 },
 	};
 
 	// #200: an error answer counted as success.
@@ -641,6 +625,59 @@ describe("Herdr socket", () => {
 		expect(herdrAnswer("a", JSON.stringify({ id: "b", result: {} }))).toBeUndefined();
 		expect(herdrAnswer("a", "not json")).toBeUndefined();
 		expect(herdrAnswer("a", "null")).toBeUndefined();
+	});
+});
+
+describe("Herdr platform environments", () => {
+	test("normal Windows reports use HERDR_BIN_PATH without compatibility markers", async () => {
+		const calls: string[][] = [];
+		vi.spyOn(childProcess, "spawn").mockImplementation((_bin, args) => {
+			calls.push([String(_bin), ...(args ?? [])]);
+			const child = new childProcess.ChildProcess();
+			queueMicrotask(() => child.emit("exit", 0));
+			return child;
+		});
+		const fake = fakePi();
+		createHerdrExtension(
+			{ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_BIN_PATH: "C:\\Herdr\\herdr.exe" },
+			"win32",
+		)(fake.pi);
+		const sessionFile = join(tempDir(), "session with spaces.jsonl");
+		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile }));
+		await until(() => calls.length === 2);
+		await fake.fire("session_shutdown", { reason: "quit" });
+		expect(calls.map((args) => args.slice(0, 4))).toEqual([
+			["C:\\Herdr\\herdr.exe", "pane", "report-agent-session", "w1:p2"],
+			["C:\\Herdr\\herdr.exe", "pane", "report-agent", "w1:p2"],
+			["C:\\Herdr\\herdr.exe", "pane", "release-agent", "w1:p2"],
+		]);
+		for (const args of calls) {
+			expect(args.slice(4, 8)).toEqual(["--source", "herdr:pi", "--agent", "pi"]);
+			expect(args).not.toContain("--");
+		}
+		expect(calls[0].slice(-4)).toEqual(["--agent-session-path", sessionFile, "--session-start-source", "startup"]);
+	});
+
+	test("normal macOS reports use HERDR_SOCKET_PATH even when HERDR_BIN_PATH is set", async () => {
+		const herdr = await fakeHerdr();
+		const fake = fakePi();
+		const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${herdr.socketPath}` : herdr.socketPath;
+		createHerdrExtension(
+			{ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: endpoint, HERDR_BIN_PATH: "/unused/herdr" },
+			"darwin",
+		)(fake.pi);
+		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/Users/me/s.jsonl" }));
+		await until(() => herdr.requests.length === 2);
+		await fake.fire("session_shutdown", { reason: "quit" });
+		expect(herdr.requests.map((request) => request.method)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent",
+			"pane.release_agent",
+		]);
+		for (const request of herdr.requests) {
+			expect(request.params).toMatchObject({ source: "herdr:pi", agent: "pi" });
+			expect(request.params).not.toHaveProperty("resume_argv");
+		}
 	});
 });
 
@@ -712,13 +749,12 @@ describe("Herdr executable (Windows)", () => {
 				method: "pane.report_agent",
 				params: {
 					pane_id: "w1:p2",
-					source: "pi-bolt",
-					agent: "pi-bolt",
+					source: "herdr:pi",
+					agent: "pi",
 					state: "blocked",
 					message: "-y to continue?",
 					seq: 7,
 					agent_session_path: "C:\\Users\\me\\s.jsonl",
-					resume_argv: ["pi-bolt", "--session", "C:\\Users\\me\\s.jsonl"],
 				},
 			}),
 		).toEqual([
@@ -726,9 +762,9 @@ describe("Herdr executable (Windows)", () => {
 			"report-agent",
 			"w1:p2",
 			"--source",
-			"pi-bolt",
+			"herdr:pi",
 			"--agent",
-			"pi-bolt",
+			"pi",
 			"--seq",
 			"7",
 			"--state",
@@ -737,44 +773,13 @@ describe("Herdr executable (Windows)", () => {
 			"-y to continue?",
 			"--agent-session-path",
 			"C:\\Users\\me\\s.jsonl",
-			"--",
-			"pi-bolt",
-			"--session",
-			"C:\\Users\\me\\s.jsonl",
 		]);
 		expect(
 			herdrArguments({
 				method: "pane.release_agent",
-				params: { pane_id: "w1:p2", source: "pi-bolt", agent: "pi-bolt", seq: 8 },
+				params: { pane_id: "w1:p2", source: "herdr:pi", agent: "pi", seq: 8 },
 			}),
-		).toEqual(["pane", "release-agent", "w1:p2", "--source", "pi-bolt", "--agent", "pi-bolt", "--seq", "8"]);
-	});
-
-	test.skipIf(process.platform === "win32")("on Windows, reports run HERDR_BIN_PATH", async () => {
-		const dir = tempDir();
-		const log = join(dir, "calls");
-		const bin = join(dir, "herdr");
-		// One line per call: its arguments, separated by |.
-		writeFileSync(bin, `#!/bin/sh\nIFS='|'; printf '%s\\n' "$*" >> '${log}'\n`);
-		chmodSync(bin, 0o755);
-		const fake = fakePi();
-		const env = { HERDR_ENV: "1", HERDR_BIN_PATH: bin, HERDR_PANE_ID: "w1:p2" };
-		createHerdrExtension(env, "win32")(fake.pi);
-		await fake.fire(
-			"session_start",
-			{ type: "session_start", reason: "startup" },
-			context({ sessionFile: "/w/s.jsonl" }),
-		);
-		const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
-		await until(() => calls().length === 1);
-		await fake.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		await until(() => calls().length === 2);
-		expect(calls()[0]).toMatch(
-			new RegExp(
-				`^pane\\|report-agent\\|w1:p2\\|--source\\|pi-bolt\\|--agent\\|pi-bolt\\|--seq\\|\\d+\\|--state\\|idle\\|--agent-session-path\\|/w/s.jsonl\\|--\\|${COMMAND_NAME}\\|--session\\|/w/s.jsonl$`,
-			),
-		);
-		expect(calls()[1]).toMatch(/^pane\|release-agent\|w1:p2\|--source\|pi-bolt\|--agent\|pi-bolt\|--seq\|\d+$/);
+		).toEqual(["pane", "release-agent", "w1:p2", "--source", "herdr:pi", "--agent", "pi", "--seq", "8"]);
 	});
 });
 
