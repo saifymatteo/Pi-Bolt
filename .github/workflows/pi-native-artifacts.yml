@@ -1,0 +1,145 @@
+name: Pi native artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/pi-native-identity]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-native-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Application update URLs may use the fork; the signed engine is always upstream's.
+  PI_NATIVE_RUNTIME_TAG: bolt-v1.0.8
+  PI_TELEMETRY: "0"
+  DO_NOT_TRACK: "1"
+
+jobs:
+  artifacts:
+    if: github.repository == 'saifymatteo/Pi-Bolt' && github.ref == 'refs/heads/feat/pi-native-identity'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: win32-x64
+          - runner: macos-15
+            platform: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Native runner architecture
+        run: node -e 'const p = process.platform + "-" + process.arch; if (p !== process.env.EXPECTED_PLATFORM) throw Error(p);'
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+      - name: macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install bash xz
+      - name: Signed upstream runtime (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/fetch-runtime.sh --version "$PI_NATIVE_RUNTIME_TAG"
+      - name: Signed upstream runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = "https://github.com/opensec-git/Pi-Bolt/releases/download/$env:PI_NATIVE_RUNTIME_TAG"
+          New-Item -ItemType Directory -Force .work\pi-native-runtime, .work\runtime | Out-Null
+          foreach ($name in 'pi-bolt-runtime-win32-x64.zip', 'SHA256SUMS', 'SHA256SUMS.sig', 'RUNTIME_STAMP') {
+            & curl.exe -fsSL -o ".work\pi-native-runtime\$name" "$base/$name"
+            if ($LASTEXITCODE -ne 0) { throw "could not download $name" }
+          }
+          & 'C:\Program Files\Git\usr\bin\openssl.exe' pkeyutl -verify -pubin -inkey keys\release.pub -rawin -in .work\pi-native-runtime\SHA256SUMS -sigfile .work\pi-native-runtime\SHA256SUMS.sig
+          if ($LASTEXITCODE -ne 0) { throw 'runtime checksum signature does not verify' }
+          $lines = Get-Content -LiteralPath .work\pi-native-runtime\SHA256SUMS
+          foreach ($name in 'pi-bolt-runtime-win32-x64.zip', 'RUNTIME_STAMP') {
+            $sum = (Get-FileHash ".work\pi-native-runtime\$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($lines -notcontains "$sum  $name") { throw "$name checksum mismatch" }
+          }
+          Expand-Archive .work\pi-native-runtime\pi-bolt-runtime-win32-x64.zip -DestinationPath .work\pi-native-runtime
+          Copy-Item .work\pi-native-runtime\pi-bolt-runtime-win32-x64\bun.exe .work\runtime\bun.exe
+          Copy-Item .work\pi-native-runtime\RUNTIME_STAMP .work\runtime\RUNTIME_STAMP
+      - name: Require the downloaded adjacent stamp to match this engine
+        # Never replace RUNTIME_STAMP with the expected value or skip on mismatch.
+        run: node scripts/pi-native-runtime.mjs .work/runtime/RUNTIME_STAMP
+      - name: Prepare Pi offline (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/prepare-pi.sh
+      - name: Prepare Pi offline (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:offline
+          exit $LASTEXITCODE
+      - name: Workflow and packaging contracts
+        run: |
+          node --test scripts/pi-native-artifacts.test.mjs
+          python scripts/pi-native-artifacts.test.py
+      - name: Focused offline source regressions
+        working-directory: packages/coding-agent
+        run: >-
+          node ../../node_modules/vitest/dist/cli.js --run
+          test/config-pi-identity.test.ts test/herdr-extension.test.ts
+          test/package-manager-cli-preflight.test.ts test/args.test.ts
+          test/pi-bolt-install-method.test.ts test/pi-bolt-latest-version.test.ts
+          test/pi-bolt-update-windows.test.ts test/pi-bolt-update-rollback.test.ts
+          test/pi-bolt-update-environment.test.ts test/pi-bolt-installer.test.ts
+          test/pi-bolt-jit-hint.test.ts test/pi-bolt-mise.test.ts
+          test/pi-bolt-scoop.test.ts test/pi-bolt-homebrew.test.ts
+      - name: Terminal submission regressions
+        working-directory: packages/tui
+        run: node --test test/terminal.test.ts
+      - name: Build JIT-on Pi (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/build-pi.sh --jit on --out out/pi-native/runtime
+      - name: Build JIT-on pi.exe (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & scripts\build-pi.ps1 -Jit on -Out out\pi-native\runtime
+          exit $LASTEXITCODE
+      - name: Expose only pi-bolt; keep native Pi and assets private
+        run: python scripts/pi-native-artifacts.py launchers out/pi-native "$PI_NATIVE_PLATFORM"
+        env:
+          PI_NATIVE_PLATFORM: ${{ matrix.platform }}
+      - name: Native Pi regression tests (macOS)
+        if: runner.os == 'macOS'
+        run: bash tests/pi/run.sh "$PWD/out/pi-native/runtime/pi"
+      - name: Native Pi regression tests (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & tests\pi\run.ps1 (Resolve-Path out\pi-native\runtime\pi.exe).Path
+          exit $LASTEXITCODE
+      - name: Canonical identity, compiled image and adjacent runtime assets
+        run: python scripts/pi-native-artifacts.py smoke out/pi-native
+      - name: Archive the entire output with checksums and provenance
+        run: python scripts/pi-native-artifacts.py archive out/pi-native "$PI_NATIVE_PLATFORM"
+        env:
+          PI_NATIVE_PLATFORM: ${{ matrix.platform }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pi-native-${{ matrix.platform }}
+          path: |
+            out/pi-native-artifacts/*.tar.gz
+            out/pi-native-artifacts/SHA256SUMS
+            out/pi-native-artifacts/build-metadata.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

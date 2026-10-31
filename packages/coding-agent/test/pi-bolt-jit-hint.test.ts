@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
@@ -72,10 +73,10 @@ describe("the JIT build to switch to", () => {
 
 	it("is installed as this one was installed", () => {
 		expect(piBoltJitSwitchCommand("installer", "linux", "x64-jit")).toBe(
-			"curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=x64-jit sh",
+			"curl -fsSL https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=x64-jit sh",
 		);
 		expect(piBoltJitSwitchCommand("installer", "win32", "x64-jit")).toBe(
-			'$env:PIBOLT_VARIANT = "x64-jit"; irm https://pi-bolt.opensec.in/install.ps1 | iex',
+			'$env:PIBOLT_VARIANT = "x64-jit"; irm https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.ps1 | iex',
 		);
 		// The npm package reads PIBOLT_VARIANT at every run on macOS and Linux, and when it is installed on Windows.
 		expect(piBoltJitSwitchCommand("npm", "darwin", "arm64-jit")).toBe(
@@ -94,7 +95,7 @@ describe("withJitHint", () => {
 			/^FFF init failed: bun:ffi requires the JIT\. pi-foo needs Pi-Bolt's JIT build \(bun:ffi\);/,
 		);
 		expect(message).toContain("switch with: ");
-		expect(message).toContain("PIBOLT_VARIANT=");
+		expect(message).toMatch(/PIBOLT_VARIANT\s*=/);
 		// Once: a message that has the hint already keeps it as it is.
 		expect(withJitHint(message, () => "pi-foo")).toBe(message);
 	});
@@ -122,7 +123,9 @@ describe("extensionDisplayName and extensionOfStack", () => {
 		const extensions = join(tempDir, "agent", "extensions");
 		mkdirSync(extensions, { recursive: true });
 		writeFileSync(join(tempDir, "agent", "package.json"), JSON.stringify({ name: "not-it" }));
-		expect(extensionDisplayName(join(extensions, "one.ts"))).toBe(join(extensions, "one.ts"));
+		const file = join(extensions, "one.ts");
+		const expected = file.startsWith(homedir() + sep) ? `~${file.slice(homedir().length)}` : file;
+		expect(extensionDisplayName(file)).toBe(expected);
 		expect(extensionDisplayName("builtin:mcp")).toBe("builtin:mcp");
 	});
 
@@ -138,6 +141,10 @@ describe("extensionDisplayName and extensionOfStack", () => {
 			"    at initializeExtension (/$bunfs/root/pi:275755:18)",
 		].join("\n");
 		expect(extensionOfStack(stack, [join(foo, "index.ts"), join(bar, "index.ts")])).toBe(join(bar, "index.ts"));
+		const urlStack = `Error\n    at open (${pathToFileURL(join(bar, "file with spaces.js"))}:3:9)`;
+		expect(extensionOfStack(urlStack, [join(foo, "index.ts"), join(bar, "index.ts")])).toBe(join(bar, "index.ts"));
+		const slashStack = `Error\n    at open (${join(bar, "index.ts").replaceAll("\\", "/")}:3:9)`;
+		expect(extensionOfStack(slashStack, [join(foo, "index.ts"), join(bar, "index.ts")])).toBe(join(bar, "index.ts"));
 		expect(extensionOfStack("Error\n    at main (/$bunfs/root/pi:1:1)", [join(foo, "index.ts")])).toBeUndefined();
 		// Single-file extensions in one folder: the frame's own file names it.
 		const folder = join(tempDir, "extensions");

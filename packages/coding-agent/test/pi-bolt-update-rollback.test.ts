@@ -1,3 +1,4 @@
+import * as childProcess from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,11 @@ import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import { piBoltChannel, setPiBoltChannel } from "../src/pi-bolt.ts";
 import { rollBackInstallation, swapFolderContents } from "../src/pi-bolt-rollback.ts";
 import { newestPiBoltVersion } from "../src/utils/version-check.ts";
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const original = await importOriginal<typeof childProcess>();
+	return { ...original, spawnSync: vi.fn(original.spawnSync) };
+});
 
 let dir: string;
 const realExecPath = process.execPath;
@@ -92,6 +98,40 @@ describe.skipIf(process.platform === "win32")("pi-bolt update --rollback", () =>
 		expect(versionOf(`${current}.previous`)).toBe("0.9.0");
 		expect(existsSync(join(`${current}.previous`, "only-in-new.txt"))).toBe(true);
 		expect(existsSync(join(`${current}.previous`, "pi.123.pibolt-old"))).toBe(false);
+	});
+});
+
+describe("Windows rollback", () => {
+	test("checks and swaps the canonical pi.exe", () => {
+		const current = join(dir, "pi-bolt-win32-x64");
+		const previous = `${current}.previous`;
+		for (const [folder, version] of [
+			[current, "1.0.8"],
+			[previous, "1.0.7"],
+		]) {
+			mkdirSync(folder, { recursive: true });
+			writeFileSync(join(folder, "pi.exe"), version);
+			writeFileSync(join(folder, "pi-bolt.txt"), `Pi-Bolt ${version}\n`);
+		}
+		const spawn = vi.mocked(childProcess.spawnSync).mockReturnValueOnce({
+			pid: 1,
+			output: [],
+			stdout: "1.4.0 (Pi-Bolt 1.0.7)",
+			stderr: "",
+			status: 0,
+			signal: null,
+		});
+		try {
+			expect(rollBackInstallation(current, "win32")).toEqual({
+				from: "Pi-Bolt 1.0.8",
+				to: "Pi-Bolt 1.0.7",
+			});
+			expect(spawn).toHaveBeenCalledWith(join(previous, "pi.exe"), ["--version"], expect.any(Object));
+			expect(readFileSync(join(current, "pi.exe"), "utf8")).toBe("1.0.7");
+			expect(readFileSync(join(previous, "pi.exe"), "utf8")).toBe("1.0.8");
+		} finally {
+			spawn.mockClear();
+		}
 	});
 });
 

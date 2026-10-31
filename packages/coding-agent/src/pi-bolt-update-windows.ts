@@ -3,7 +3,7 @@
  *
  * Updates used to start the installer as `powershell -Command "irm https://.../install.ps1 | iex"`. A program that starts
  * PowerShell to download a script and run it with iex is what a malware "download cradle" does, and behavior-based antivirus
- * stops it as such: Kaspersky's System Watcher reports PDM:Trojan.Win32.Generic for pi-bolt.exe during `pi-bolt update`
+ * stops it as such: Kaspersky's System Watcher reports PDM:Trojan.Win32.Generic for pi.exe during `pi-bolt update`
  * (#82). So Pi-Bolt updates itself here, doing what install.ps1 does for an update (PIBOLT_YES, PIBOLT_NO_PATH: no questions,
  * no PATH, no extensions): the signed SHA256SUMS, the release's .zip from npm or else GitHub, checked against them, unpacked
  * by Windows' own tar.exe, the build it replaces kept as <folder>.previous for `pi-bolt update --rollback`, and the new files
@@ -34,7 +34,7 @@ import { gunzipSync } from "node:zlib";
 import chalk from "chalk";
 import { PIBOLT_RELEASE_KEY } from "./pi-bolt.ts";
 
-const REPO = "https://github.com/opensec-git/Pi-Bolt";
+const REPO = "https://github.com/saifymatteo/Pi-Bolt";
 const ASIDE = /\.pibolt-(old|new)$/;
 
 /** Whether `dir` is under the user's profile (%USERPROFILE% or %LOCALAPPDATA%), as install.ps1's Test-PiBoltInProfile. */
@@ -144,7 +144,7 @@ function moveFile(from: string, to: string): void {
  * Moves the new build in `from` into place over the one in `to`, as install.ps1's Install-PiBoltFiles: a running Pi-Bolt keeps
  * its executable and DLLs open, and Windows lets those be renamed but not replaced or deleted. Each new file is first moved
  * next to its target, then the old one renamed aside, then the new one renamed into place (if that fails, the old one is put
- * back); pi-bolt.exe last, so that until it is in place the one that runs is the old one. What was renamed aside is deleted
+ * back); pi.exe last, so that until it is in place the one that runs is the old one. What was renamed aside is deleted
  * now if it can be, or by the next install.
  */
 export function installFiles(from: string, to: string, stamp: number = Date.now()): void {
@@ -153,7 +153,7 @@ export function installFiles(from: string, to: string, stamp: number = Date.now(
 	}
 	mkdirSync(to, { recursive: true });
 	const files = filesIn(from).sort(
-		(a, b) => Number(/(^|[\\/])pi-bolt\.exe$/i.test(a)) - Number(/(^|[\\/])pi-bolt\.exe$/i.test(b)),
+		(a, b) => Number(/(^|[\\/])pi\.exe$/i.test(a)) - Number(/(^|[\\/])pi\.exe$/i.test(b)),
 	);
 	for (const file of files) {
 		const target = join(to, file);
@@ -188,7 +188,7 @@ export function installFiles(from: string, to: string, stamp: number = Date.now(
  * pi-bolt.txt). Copied, since the running Pi-Bolt keeps its folder from being renamed. A note, not an error, if it cannot be.
  */
 export function keepPrevious(dir: string, incoming: string, note: (text: string) => void = () => {}): void {
-	if (!existsSync(join(dir, "pi-bolt.exe"))) return;
+	if (!existsSync(join(dir, "pi.exe"))) return;
 	const read = (folder: string) => {
 		try {
 			return readFileSync(join(folder, "pi-bolt.txt"), "utf8");
@@ -307,8 +307,8 @@ export async function updatePiBoltWindows(version: string, installDir: string, v
 		if (extracted.status !== 0)
 			throw new Error(`could not unpack ${archive}: ${(extracted.stderr || String(extracted.error ?? "")).trim()}`);
 		const build = join(unpacked, name);
-		const exe = join(build, "pi-bolt.exe");
-		if (!existsSync(exe)) throw new Error(`${archive} does not have ${name}\\pi-bolt.exe`);
+		const exe = join(build, "pi.exe");
+		if (!existsSync(exe)) throw new Error(`${archive} does not have ${name}\\pi.exe`);
 		if (spawnSync(exe, ["--version"], { stdio: "ignore" }).status !== 0)
 			throw new Error("the downloaded executable does not run on this system");
 		keepPrevious(dir, build, (text) => console.log(chalk.dim(`  ${text}`)));
@@ -320,5 +320,5 @@ export async function updatePiBoltWindows(version: string, installDir: string, v
 		rmSync(tmp, { recursive: true, force: true });
 	}
 	// Pi-Bolt keeps the packages only it runs out of Pi's list as it starts: once now, as install.ps1 does after an install.
-	spawnSync(join(dir, "pi-bolt.exe"), ["list"], { cwd: dir, stdio: "ignore" });
+	spawnSync(join(dir, "pi.exe"), ["list"], { cwd: dir, stdio: "ignore" });
 }

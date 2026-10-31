@@ -4,7 +4,7 @@ The design notes of the Windows port, which shipped in 0.8.0: keeping the prebui
 mitigation on, and what it rests on: measurements on the port's machine (Intel Core i5-1335U, Windows 11 26200, Defender on),
 written while the port was being built. For installing and using Pi-Bolt on Windows, see the README and
 [Troubleshooting: Windows](TROUBLESHOOTING.md#windows).
-For the opt-in Pi identity prototype used with stock Herdr, see [Herdr compatibility](HERDR.md).
+For this fork's compiled `pi-bolt` command alongside Node Pi and a Herdr feedback trial, see [Using Pi-Bolt with Herdr](HERDR.md).
 
 ## What has to be at a fixed address today
 

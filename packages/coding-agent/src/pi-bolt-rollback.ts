@@ -50,9 +50,7 @@ export function swapFolderContents(current: string, previous: string): void {
 	const keep = `${current}.rollback-${stamp}`;
 	cpSync(current, keep, { recursive: true, filter: (source) => !ASIDE.test(source) });
 	try {
-		const incoming = filesIn(previous).sort(
-			(a, b) => Number(/pi-bolt\.exe$/i.test(a)) - Number(/pi-bolt\.exe$/i.test(b)),
-		);
+		const incoming = filesIn(previous).sort((a, b) => Number(/pi\.exe$/i.test(a)) - Number(/pi\.exe$/i.test(b)));
 		const wanted = new Set(incoming);
 		const aside = (file: string): void => {
 			const target = join(current, file);
@@ -97,7 +95,7 @@ export function rollBackInstallation(
 		);
 	}
 	// The build to go back to has to run here before it takes this one's place.
-	const executable = join(previous, platform === "win32" ? "pi-bolt.exe" : "pi");
+	const executable = join(previous, platform === "win32" ? "pi.exe" : "pi");
 	const check = spawnSync(executable, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 	if (check.status !== 0 || !check.stdout.includes("Pi-Bolt ")) {
 		throw new Error(
