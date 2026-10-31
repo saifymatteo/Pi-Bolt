@@ -22,6 +22,18 @@ export type HerdrRequest =
 				resume_argv?: string[];
 			};
 	  }
+	| {
+			method: "pane.report_agent_session";
+			params: {
+				pane_id: string;
+				source: string;
+				agent: string;
+				seq: number;
+				agent_session_path?: string;
+				agent_session_id?: string;
+				session_start_source?: string;
+			};
+	  }
 	| { method: "pane.release_agent"; params: { pane_id: string; source: string; agent: string; seq: number } };
 
 /**
@@ -152,6 +164,18 @@ export function herdrArguments(request: HerdrRequest): string[] {
 	const { pane_id, source, agent, seq } = request.params;
 	const common = ["--source", source, "--agent", agent, "--seq", String(seq)];
 	if (request.method === "pane.release_agent") return ["pane", "release-agent", pane_id, ...common];
+	if (request.method === "pane.report_agent_session") {
+		const { agent_session_path, agent_session_id, session_start_source } = request.params;
+		return [
+			"pane",
+			"report-agent-session",
+			pane_id,
+			...common,
+			...(agent_session_path ? ["--agent-session-path", agent_session_path] : []),
+			...(agent_session_id ? ["--agent-session-id", agent_session_id] : []),
+			...(session_start_source ? ["--session-start-source", session_start_source] : []),
+		];
+	}
 	const { state, message, agent_session_path, agent_session_id, resume_argv } = request.params;
 	return [
 		"pane",

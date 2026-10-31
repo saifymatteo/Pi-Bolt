@@ -395,8 +395,9 @@ export class ProcessTerminal implements Terminal {
 
 	private forwardInputSequence(sequence: string): void {
 		if (!this.inputHandler) return;
+		// Kitty already encodes modifiers; global Shift may belong to a shortcut in another pane.
 		const shouldDetectNativeShiftEnter =
-			sequence === "\r" && (isAppleTerminalSession() || process.platform === "win32");
+			!this._kittyProtocolActive && sequence === "\r" && (isAppleTerminalSession() || process.platform === "win32");
 		const input = normalizeNativeShiftEnterInput(
 			sequence,
 			shouldDetectNativeShiftEnter,

@@ -38,6 +38,7 @@ import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader, formatPackageInstallWarning, isBuiltinExtension } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
+import { isHerdrPiCompatibilityProcess } from "./herdr-pi-compat.ts";
 import {
 	isPiBoltChannel,
 	PIBOLT,
@@ -289,6 +290,21 @@ const SELF_UPDATE_NOTE_MARKDOWN_THEME: MarkdownTheme = {
 
 /** Checked before startup reads settings: even the historical safety migration is a write. */
 export function getPiBoltPackageFlagError(args: string[]): string | undefined {
+	if (isHerdrPiCompatibilityProcess()) {
+		if (PIBOLT && args[0] === "compile") {
+			return "Exit Herdr compatibility mode and run pi-bolt compile from the original installation.";
+		}
+		const command = parsePackageCommand(args);
+		if (
+			command?.command === "update" &&
+			!command.help &&
+			(command.channel ||
+				command.updateTarget?.type === "rollback" ||
+				updateTargetIncludesSelf(command.updateTarget ?? { type: "self" }))
+		) {
+			return "Exit Herdr compatibility mode and update or roll back Pi-Bolt using its original installation.";
+		}
+	}
 	if (!["install", "remove", "uninstall", "update", "list", "config"].includes(args[0])) {
 		// Startup options can consume dash-prefixed values, including a literal "--".
 		if (!parseArgs(args).unknownFlags.has("pi-bolt")) return undefined;
@@ -1165,6 +1181,12 @@ export async function handlePackageCommand(
 ): Promise<boolean> {
 	// Pi-Bolt: `pi-bolt compile` (pi-bolt-compile.ts). In Pi, `compile` stays a message to the model.
 	if (PIBOLT && args[0] === "compile") {
+		const flagError = getPiBoltPackageFlagError(args);
+		if (flagError) {
+			console.error(chalk.red(flagError));
+			process.exitCode = 1;
+			return true;
+		}
 		const build = PIBOLT;
 		process.exitCode = await runPiBoltCompile(args.slice(1), () =>
 			runPiBoltSelfUpdate(build.version, { reinstall: true, recompile: false }),

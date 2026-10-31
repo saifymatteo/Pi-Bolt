@@ -1,12 +1,17 @@
 import assert from "node:assert";
 import { describe, it, mock } from "node:test";
+import { Editor } from "../src/components/editor.ts";
 import { setKittyProtocolActive } from "../src/keys.ts";
+import { getNativePlatformHelper } from "../src/native-platform.ts";
 import {
 	normalizeAppleTerminalInput,
 	normalizeNativeShiftEnterInput,
 	ProcessTerminal,
 	resolveEscapeTimeoutMs,
 } from "../src/terminal.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { defaultEditorTheme } from "./test-themes.ts";
+import { VirtualTerminal } from "./virtual-terminal.ts";
 
 describe("resolveEscapeTimeoutMs", () => {
 	it("uses PI_TUI_ESC_TIMEOUT when configured", () => {
@@ -78,7 +83,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		cleanup(): void;
 	};
 
-	function setupNegotiation(): NegotiationHarness {
+	function setupNegotiation(onInput?: (data: string) => void): NegotiationHarness {
 		const terminal = new ProcessTerminal();
 		const writes: string[] = [];
 		let input: string | undefined;
@@ -103,6 +108,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			}
 		).inputHandler = (data) => {
 			input = data;
+			onInput?.(data);
 		};
 		(terminal as unknown as { queryAndEnableKittyProtocol(): void }).queryAndEnableKittyProtocol();
 
@@ -127,6 +133,54 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 				}
 			},
 		};
+	}
+
+	for (const kittyActive of [true, false]) {
+		it(
+			kittyActive
+				? "submits injected Enter while physical Shift is held when Kitty encodes modifiers"
+				: "preserves native Shift+Enter fallback without Kitty keyboard support",
+			{ skip: process.platform !== "win32" },
+			() => {
+				const helper = getNativePlatformHelper();
+				assert.ok(helper?.isModifierPressed);
+				let shiftHeld = true;
+				// Model holding Shift after Annotate's Shift+S without changing OS keyboard state.
+				const previousModifier = helper.isModifierPressed;
+				helper.isModifierPressed = (key) => key === "shift" && shiftHeld;
+				const editor = new Editor(new TuiMainScreen(new VirtualTerminal()), defaultEditorTheme);
+				const submitted: string[] = [];
+				editor.onSubmit = (text) => submitted.push(text);
+				const harness = setupNegotiation((data) => editor.handleInput(data));
+				const feedback = "Please apply this annotation.";
+				const frame = `\x1b[200~${feedback}\x1b[201~\r`;
+				try {
+					harness.send(kittyActive ? "\x1b[?7u" : "\x1b[?0u");
+					// Cover paste and Enter arriving together or split at any byte boundary.
+					for (let cut = 0; cut <= frame.length; cut++) {
+						editor.setText("");
+						submitted.length = 0;
+						harness.send(frame.slice(0, cut));
+						harness.send(frame.slice(cut));
+						assert.deepEqual(submitted, kittyActive ? [feedback] : [], `split ${cut}`);
+						assert.equal(editor.getText(), kittyActive ? "" : `${feedback}\n`, `split ${cut}`);
+					}
+
+					// A genuinely encoded Shift+Enter must still insert a newline.
+					editor.setText(feedback);
+					submitted.length = 0;
+					harness.send("\x1b[13;2u");
+					assert.equal(editor.getText(), `${feedback}\n`);
+					assert.deepEqual(submitted, []);
+					shiftHeld = false;
+					harness.send("\r");
+					assert.deepEqual(submitted, [feedback]);
+				} finally {
+					harness.cleanup();
+					helper.isModifierPressed = previousModifier;
+				}
+			},
+		);
 	}
 
 	it("queries Kitty mode before enabling modifyOtherKeys fallback", () => {
