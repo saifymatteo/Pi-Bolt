@@ -67,6 +67,7 @@ import { quietOtherHerdrReporters } from "./extensions/herdr/index.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { loadMcpCommand } from "./extensions/mcp/cli.lazy.ts";
 import { loadMcpMode } from "./extensions/mcp-server/mode.lazy.ts";
+import { launchHerdrPiCompatibility } from "./herdr-pi-compat.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { loadInteractiveMode } from "./modes/interactive/interactive-mode.lazy.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -588,11 +589,30 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	const parsed = parseArgs(args);
 	const packageFlagError = getPiBoltPackageFlagError(args);
 	if (packageFlagError) {
 		console.error(chalk.red(packageFlagError));
 		process.exitCode = 1;
 		return;
+	}
+	if (parsed.herdrAsPi) {
+		if (parsed.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+			reportDiagnostics(parsed.diagnostics);
+			process.exitCode = 1;
+			return;
+		}
+		try {
+			const exitCode = await launchHerdrPiCompatibility(args);
+			if (exitCode !== undefined) {
+				process.exitCode = exitCode;
+				return;
+			}
+		} catch (error) {
+			console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+			process.exitCode = 1;
+			return;
+		}
 	}
 	ttiTrace("main.entered");
 	resetTimings();
@@ -652,7 +672,6 @@ export async function main(args: string[], options?: MainOptions) {
 		return;
 	}
 
-	const parsed = parseArgs(args);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;

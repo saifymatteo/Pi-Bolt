@@ -31,6 +31,7 @@ export interface Args {
 	resume?: boolean;
 	help?: boolean;
 	version?: boolean;
+	herdrAsPi?: boolean;
 	mode?: Mode;
 	name?: string;
 	noSession?: boolean;
@@ -111,6 +112,11 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
+		} else if (arg === "--herdr-as-pi") {
+			result.herdrAsPi = true;
+		} else if (arg.startsWith("--herdr-as-pi=")) {
+			result.herdrAsPi = true;
+			result.diagnostics.push({ type: "error", message: "--herdr-as-pi does not take a value" });
 		} else if (arg === "--mode") {
 			const mode = args[i + 1];
 			if (mode === undefined || mode.startsWith("-")) {
@@ -365,7 +371,7 @@ ${chalk.bold("Options:")}
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
-  --                             End option parsing; treat remaining arguments as messages/files
+${PIBOLT ? "  --herdr-as-pi                  Experimental Windows native Pi identity for stock Herdr\n" : ""}  --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number
 

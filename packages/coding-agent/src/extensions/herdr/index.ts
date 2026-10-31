@@ -8,7 +8,8 @@
  * reports for itself, as Herdr's "Add Herdr support to your agent" describes: its own source and agent name, its own resume
  * command. Outside Herdr (HERDR_ENV and HERDR_PANE_ID unset) it does nothing. Reports go over Herdr's socket, or on
  * Windows through the `herdr` executable (transport.ts). Disable it with
- * `-builtin:herdr` in the `extensions` setting.
+ * `-builtin:herdr` in the `extensions` setting. The opt-in `--herdr-as-pi` child reports as Herdr's canonical `pi` agent
+ * (`herdr:pi` source), retaining the flag in its Pi-Bolt resume command.
  *
  * Only the interactive session reports: print, JSON and RPC runs, and subagents (sessions without a UI), would otherwise
  * take over the pane of the session that started them.
@@ -17,10 +18,8 @@
 import { isAbsolute } from "node:path";
 import { COMMAND_NAME } from "../../config.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../core/extensions/types.ts";
+import { HERDR_PI_COMPAT_FLAG, isHerdrPiCompatibilityProcess } from "../../herdr-pi-compat.ts";
 import { type HerdrRequest, type HerdrTransport, herdrFromEnvironment } from "./transport.ts";
-
-const SOURCE = "pi-bolt";
-const AGENT = "pi-bolt";
 
 type AgentState = "working" | "blocked" | "idle";
 
@@ -49,11 +48,15 @@ async function send(transport: HerdrTransport, request: () => HerdrRequest | und
 /**
  * The command Herdr runs to reopen this session after a server restart: `pi-bolt --session <file>`. Herdr refuses a
  * report whose command has an apostrophe or a control character in it or is over 8 KiB, so such a session gets no command
- * (its state still reaches Herdr).
+ * (its state still reaches Herdr). Compatibility children keep the opt-in flag on resume; the executable must stay a
+ * plain command name because stock Herdr rejects absolute executable paths.
  */
-export function resumeArgv(sessionFile: string | undefined): string[] | undefined {
+export function resumeArgv(
+	sessionFile: string | undefined,
+	compatibility = isHerdrPiCompatibilityProcess(),
+): string[] | undefined {
 	if (!sessionFile || !isAbsolute(sessionFile)) return undefined;
-	const argv = [COMMAND_NAME, "--session", sessionFile];
+	const argv = [COMMAND_NAME, ...(compatibility ? [HERDR_PI_COMPAT_FLAG] : []), "--session", sessionFile];
 	if (argv.some((arg) => arg.includes("'") || hasControlCharacter(arg))) return undefined;
 	if (argv.reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 8192) return undefined;
 	return argv;
@@ -76,6 +79,9 @@ export function createHerdrExtension(
 		const herdr = herdrFromEnvironment(env, platform);
 		if (!herdr) return;
 		const { transport, paneId } = herdr;
+		const compatibility = isHerdrPiCompatibilityProcess(env);
+		const source = compatibility ? "herdr:pi" : "pi-bolt";
+		const agent = compatibility ? "pi" : "pi-bolt";
 
 		// Herdr ignores a report whose number is not above the last one from this source, across restarts of Pi-Bolt too.
 		let seq = Date.now() * 1000;
@@ -145,11 +151,14 @@ export function createHerdrExtension(
 				return;
 			}
 			last = next;
-			const argv = resumeArgv(sessionFile);
+			// Preserve the prototype's resume identity along with upstream's per-attempt sequence and quit guards.
+			const argv =
+				resumeArgv(sessionFile, compatibility) ??
+				(compatibility ? [COMMAND_NAME, HERDR_PI_COMPAT_FLAG, "--resume"] : undefined);
 			const params = {
 				pane_id: paneId,
-				source: SOURCE,
-				agent: AGENT,
+				source,
+				agent,
 				state: next.state,
 				...(next.message ? { message: next.message } : {}),
 				...(sessionFile ? { agent_session_path: sessionFile } : sessionId ? { agent_session_id: sessionId } : {}),
@@ -164,10 +173,29 @@ export function createHerdrExtension(
 			void drain();
 		}
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", async (event, ctx) => {
 			if (ctx.mode !== "tui") return;
 			reporting = true;
 			updateSession(ctx);
+			// Herdr's canonical Pi lifecycle ignores state until the selected session is explicitly registered.
+			// Register first, without resume_argv: the subsequent state report takes ownership and sets Pi-Bolt's resume.
+			if (compatibility && (sessionFile || sessionId)) {
+				await send(transport, () =>
+					reporting
+						? {
+								method: "pane.report_agent_session",
+								params: {
+									pane_id: paneId,
+									source,
+									agent,
+									seq: nextSeq(),
+									session_start_source: event.reason,
+									...(sessionFile ? { agent_session_path: sessionFile } : { agent_session_id: sessionId }),
+								},
+							}
+						: undefined,
+				);
+			}
 			// A reload replaces this extension in the middle of a run without another agent_start.
 			agentActive = ctx.isIdle() === false;
 			publish(true);
@@ -245,7 +273,7 @@ export function createHerdrExtension(
 			await transport(
 				{
 					method: "pane.release_agent",
-					params: { pane_id: paneId, source: SOURCE, agent: AGENT, seq: nextSeq() },
+					params: { pane_id: paneId, source, agent, seq: nextSeq() },
 				},
 				500,
 			);
