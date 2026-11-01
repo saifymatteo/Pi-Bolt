@@ -84,24 +84,23 @@ try {
 setlocal EnableExtensions
 set "PIBOLT_FALLBACK=__PIBOLT_FALLBACK__"
 set "PIBOLT_RESOLVED="
-for /f "usebackq delims=" %%F in (`where pi 2^>nul`) do (
-	if not defined PIBOLT_RESOLVED (
-		if /i not "%%~fF"=="%~f0" if /i not "%%~dpF"=="%~dp0" (
-			findstr /i /m /c:"PIBOLT_FALLBACK" "%%~fF" >nul 2>&1
-			if errorlevel 1 (
-				if /i "%%~xF"==".exe" set "PIBOLT_RESOLVED=%%~fF"
-				if /i not defined PIBOLT_RESOLVED if /i "%%~xF"==".cmd" set "PIBOLT_RESOLVED=%%~fF"
-				if /i not defined PIBOLT_RESOLVED if /i "%%~xF"==".bat" set "PIBOLT_RESOLVED=%%~fF"
-			)
-		)
-	)
-)
+for /f "usebackq delims=" %%F in (`where pi 2^>nul`) do call :pibolt_consider "%%~fF"
 if not defined PIBOLT_RESOLVED goto pibolt_fallback
 call "%PIBOLT_RESOLVED%" %*
 exit /b %errorlevel%
 :pibolt_fallback
 "%PIBOLT_FALLBACK%" %*
 exit /b %errorlevel%
+:pibolt_consider
+if /i "%~1"=="%~f0" exit /b 0
+if /i "%~dp1"=="%~dp0" exit /b 0
+for %%P in ("%PIBOLT_FALLBACK%") do if /i "%~1"=="%%~fP" exit /b 0
+findstr /i /m /c:"PIBOLT_FALLBACK" "%~1" >nul 2>&1
+if not errorlevel 1 exit /b 0
+if /i "%~x1"==".exe" if not defined PIBOLT_RESOLVED set "PIBOLT_RESOLVED=%~1"
+if /i "%~x1"==".cmd" if not defined PIBOLT_RESOLVED set "PIBOLT_RESOLVED=%~1"
+if /i "%~x1"==".bat" if not defined PIBOLT_RESOLVED set "PIBOLT_RESOLVED=%~1"
+exit /b 0
 '@
 	Set-Content -LiteralPath (Join-Path $BinDir 'pi.cmd') -Encoding Ascii -Value $piShim.Replace('__PIBOLT_FALLBACK__', $installedExe)
 

@@ -51,16 +51,18 @@ cat > "$BIN_DIR/pi" <<'EOF'
 #!/bin/sh
 # pi shim installed by pi-bolt: real pi on PATH wins, else the compiled build (PIBOLT_FALLBACK).
 self_dir=$(CDPATH='' cd "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=
+fallback=__PIBOLT_FALLBACK__
 saved_IFS=$IFS
 IFS=':'
 for d in $PATH; do
 	IFS=$saved_IFS
 	case "$d" in ''|"${self_dir:-__none__}") continue ;; esac
 	[ -x "$d/pi" ] && [ ! -d "$d/pi" ] || continue
+	case "$d/pi" in "$fallback") continue ;; esac
 	grep -q 'PIBOLT_FALLBACK' "$d/pi" 2>/dev/null && continue
 	exec "$d/pi" "$@"
 done
-exec "__PIBOLT_FALLBACK__" "$@"
+exec "$fallback" "$@"
 EOF
 esc=$(printf '%s' "$DIR/pi" | sed 's/[\\&|]/\\&/g')
 sed -i.bak "s|__PIBOLT_FALLBACK__|$esc|" "$BIN_DIR/pi" && rm -f "$BIN_DIR/pi.bak"
