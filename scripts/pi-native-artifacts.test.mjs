@@ -101,7 +101,7 @@ test("a pi-native-v* tag publishes both archives as a verified prerelease", () =
 		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
 	}
 	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\*.*--prerelease/s);
-	assert.match(runs, /cp scripts\/install\/install\.ps1 scripts\/install\/install\.sh out\/release\//);
+	assert.match(runs, /cp install\.ps1 install\.sh out\/release\//);
 	assert.doesNotMatch(runs, /npm publish|homebrew|crates|cargo publish/);
 });
 
