@@ -112,12 +112,14 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(metadata["runtimeStamp"], "d615e931f06bb5a4")
                 self.assertEqual(metadata["runtimeSha256"], hashlib.sha256(b"test engine").hexdigest())
                 manifest = tar.extractfile("pi-native/SHA256SUMS").read().decode()
+                self.assertNotIn("\r", manifest)
                 self.assertEqual({line.split("  ", 1)[1] for line in manifest.splitlines()},
                                  {*files, launcher, "build-metadata.json"})
                 for line in manifest.splitlines():
                     expected, name = line.split("  ", 1)
                     self.assertEqual(hashlib.sha256(tar.extractfile("pi-native/" + name).read()).hexdigest(), expected)
             checksum = archive.with_name("SHA256SUMS").read_text().split("  ")[0]
+            self.assertNotIn("\r", archive.with_name("SHA256SUMS").read_text())
             self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), checksum)
 
 

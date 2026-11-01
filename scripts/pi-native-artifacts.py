@@ -132,13 +132,14 @@ def archive(directory, platform):
     paths = sorted(p for p in directory.rglob("*") if p.is_file() and p != directory / "SHA256SUMS")
     sums = "".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(directory).as_posix()}\n"
                    for p in paths)
-    (directory / "SHA256SUMS").write_text(sums)
+    # LF only: shasum on macOS rejects CRLF checksum lines.
+    (directory / "SHA256SUMS").write_text(sums, newline="\n")
     artifacts = ROOT / "out/pi-native-artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     target = artifacts / f"pi-native-{platform}.tar.gz"
     # tar, rather than upload-artifact's zip, preserves launcher/helper and native executable modes.
     subprocess.run(["tar", "-czf", str(target), "-C", str(directory.parent), directory.name], check=True)
-    (artifacts / "SHA256SUMS").write_text(f"{hashlib.sha256(target.read_bytes()).hexdigest()}  {target.name}\n")
+    (artifacts / "SHA256SUMS").write_text(f"{hashlib.sha256(target.read_bytes()).hexdigest()}  {target.name}\n", newline="\n")
     (artifacts / "build-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Archived full output: {target}")
 
