@@ -47,7 +47,10 @@ try {
 
 	$unpacked = Join-Path $tmp 'unpacked'
 	New-Item -ItemType Directory -Force $unpacked | Out-Null
-	& tar.exe -xf $zip -C $unpacked
+	# Windows' own tar reads zip; a GNU tar on PATH would read 'D:' as a remote host. (PS 5.1 has no ?: operator.)
+	$systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+	$tar = Join-Path $systemRoot 'System32\tar.exe'
+	& $tar -xf $zip -C $unpacked
 	if ($LASTEXITCODE -ne 0) { throw 'could not unpack the archive' }
 	$build = Join-Path $unpacked "pi-bolt-win32-$Variant"
 	$exe = Join-Path $build 'pi.exe'
@@ -64,12 +67,6 @@ try {
 		Remove-Item $VariantDir -Recurse -Force
 	}
 	Copy-Item $build $VariantDir -Recurse
-	# The earlier fork layout (%LOCALAPPDATA%\pi-bolt\pi-native) is ours alone; remove it once the new one is in place.
-	$legacy = Join-Path $env:LOCALAPPDATA 'pi-bolt\pi-native'
-	if ((Test-Path $legacy) -and ($InstallDir -ne (Join-Path $env:LOCALAPPDATA 'pi-bolt'))) {
-		Remove-Item (Split-Path $legacy) -Recurse -Force
-		Write-Host 'removed the previous fork install at %LOCALAPPDATA%\pi-bolt'
-	}
 
 	New-Item -ItemType Directory -Force $BinDir | Out-Null
 	# A shim, not a copy: updates replace the runtime, the shim keeps working.
@@ -86,6 +83,18 @@ try {
 
 	& $exe --version
 	Write-Host "Installed. Run: pi-bolt (new terminal, or $(Join-Path $BinDir 'pi-bolt.cmd'))"
+
+	# The earlier fork layout (%LOCALAPPDATA%\pi-bolt\pi-native) is ours alone; removing it is best effort: running
+	# processes hold its files, and a failed cleanup must not fail the install.
+	$legacy = Join-Path $env:LOCALAPPDATA 'pi-bolt'
+	if ((Test-Path (Join-Path $legacy 'pi-native')) -and ($InstallDir -ne $legacy)) {
+		try {
+			Remove-Item $legacy -Recurse -Force
+			Write-Host 'removed the previous fork install at %LOCALAPPDATA%\pi-bolt'
+		} catch {
+			Write-Host "note: could not remove the previous install at $legacy (a process may be running)"
+		}
+	}
 } finally {
 	Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
