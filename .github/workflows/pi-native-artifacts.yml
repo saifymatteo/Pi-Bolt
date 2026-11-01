@@ -139,6 +139,7 @@ jobs:
           name: pi-native-${{ matrix.platform }}
           path: |
             out/pi-native-artifacts/*.tar.gz
+            out/pi-native-artifacts/*.zip
             out/pi-native-artifacts/SHA256SUMS
             out/pi-native-artifacts/build-metadata.json
           if-no-files-found: error
@@ -172,11 +173,25 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p out/release
-          cp stage/win32-x64/pi-native-win32-x64.tar.gz stage/darwin-arm64/pi-native-darwin-arm64.tar.gz out/release/
+          cp stage/win32-x64/pi-bolt-win32-x64-jit.zip stage/darwin-arm64/pi-bolt-darwin-arm64-jit.tar.gz out/release/
           cp scripts/install/install.ps1 scripts/install/install.sh out/release/
-          cat stage/win32-x64/SHA256SUMS stage/darwin-arm64/SHA256SUMS > out/release/SHA256SUMS
           cp stage/win32-x64/build-metadata.json out/release/build-metadata-win32-x64.json
           cp stage/darwin-arm64/build-metadata.json out/release/build-metadata-darwin-arm64.json
+          # The updater's fetchSignedSums reads the version from the first line, and the installers and archives by name.
+          version="${GITHUB_REF_NAME#pi-native-v}"
+          {
+            echo "# pi-bolt $version"
+            (cd out/release && sha256sum install.ps1 install.sh pi-bolt-win32-x64-jit.zip pi-bolt-darwin-arm64-jit.tar.gz)
+          } > out/release/SHA256SUMS
+      - name: Sign the checksums
+        env:
+          PI_NATIVE_RELEASE_KEY: ${{ secrets.PI_NATIVE_RELEASE_KEY }}
+        run: |
+          printf '%s' "$PI_NATIVE_RELEASE_KEY" > out/release-signing.key
+          openssl pkeyutl -sign -rawin -in out/release/SHA256SUMS -inkey out/release-signing.key -out out/release/SHA256SUMS.sig
+          rm out/release-signing.key
+          # The executable's built-in key must take the signature: catch a key/step mismatch before publishing.
+          openssl pkeyutl -verify -pubin -inkey keys/pi-native-release.pub -rawin -in out/release/SHA256SUMS -sigfile out/release/SHA256SUMS.sig
       - name: Publish the release at this tag
         env:
           GH_TOKEN: ${{ github.token }}

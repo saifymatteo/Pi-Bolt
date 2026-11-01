@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,7 +61,7 @@ class ArchiveTests(unittest.TestCase):
                     ARTIFACTS.check_layout(root, platform)
                 (root / name).unlink()
 
-    def test_full_output_checksums_metadata_and_unix_modes(self):
+    def test_release_archive_carries_one_variant_folder_with_the_runtime(self):
         for platform in ("win32-x64", "darwin-arm64"):
             with self.subTest(platform=platform):
                 self.check_archive(platform)
@@ -93,34 +94,36 @@ class ArchiveTests(unittest.TestCase):
                    "GITHUB_RUN_ATTEMPT": "1", "PI_NATIVE_RUNTIME_TAG": "bolt-v1.0.8"}
             with patch.object(ARTIFACTS, "ROOT", root), patch.dict(os.environ, env):
                 ARTIFACTS.archive(output, platform)
-            archive = root / f"out/pi-native-artifacts/pi-native-{platform}.tar.gz"
-            with tarfile.open(archive, "r:gz") as tar:
-                self.assertNotIn("pi-native/pi", tar.getnames())
-                self.assertNotIn("pi-native/pi.exe", tar.getnames())
-                self.assertEqual(tar.extractfile("pi-native/" + launcher).read(), (output / launcher).read_bytes())
-                for name in (*files, launcher):
-                    member = tar.getmember("pi-native/" + name)
-                    if name in files:
-                        self.assertEqual(tar.extractfile(member).read(), name.encode())
-                    if os.name != "nt":
-                        executable = name in (*executables, "pi-bolt") or name.endswith("/helper")
-                        self.assertEqual(member.mode & 0o777, 0o755 if executable else 0o644)
-                metadata = json.load(tar.extractfile("pi-native/build-metadata.json"))
-                self.assertEqual(metadata["platform"], platform)
-                self.assertEqual(metadata["sha"], "a" * 40)
-                self.assertEqual(metadata["runtimeTag"], "bolt-v1.0.8")
-                self.assertEqual(metadata["runtimeStamp"], "d615e931f06bb5a4")
-                self.assertEqual(metadata["runtimeSha256"], hashlib.sha256(b"test engine").hexdigest())
-                manifest = tar.extractfile("pi-native/SHA256SUMS").read().decode()
-                self.assertNotIn("\r", manifest)
-                self.assertEqual({line.split("  ", 1)[1] for line in manifest.splitlines()},
-                                 {*files, launcher, "build-metadata.json"})
-                for line in manifest.splitlines():
-                    expected, name = line.split("  ", 1)
-                    self.assertEqual(hashlib.sha256(tar.extractfile("pi-native/" + name).read()).hexdigest(), expected)
+            variant = ARTIFACTS.release_variant(platform)
+            suffix = "zip" if windows else "tar.gz"
+            archive = root / f"out/pi-native-artifacts/{variant}.{suffix}"
+            # The local layout (launchers beside runtime/) never enters the release archive; the runtime does, under the
+            # variant folder name the updater and installers expect.
+            inner = [(name[len("runtime/"):], name.encode()) for name in files]
+            if windows:
+                with zipfile.ZipFile(archive) as zipped:
+                    names = zipped.namelist()
+                    self.assertEqual({name.split("/", 1)[0] for name in names if name.strip("/")}, {variant})
+                    self.assertNotIn(f"{variant}/{launcher}", names)
+                    for name, content in inner:
+                        self.assertEqual(zipped.read(f"{variant}/{name}"), content)
+                    self.assertEqual(zipped.read(f"{variant}/pi.exe"), b"runtime/pi.exe")
+            else:
+                with tarfile.open(archive, "r:gz") as tar:
+                    names = tar.getnames()
+                    self.assertEqual({name.split("/", 1)[0] for name in names if name.strip("/")}, {variant})
+                    for name, content in inner:
+                        member = tar.getmember(f"{variant}/{name}")
+                        self.assertEqual(tar.extractfile(member).read(), content)
+                        if os.name != "nt":
+                            executable = name in ("pi", "pi.exe", "pi-bin", "pi-spawn") or name.endswith("/helper")
+                            self.assertEqual(member.mode & 0o777, 0o755 if executable else 0o644)
             checksum = archive.with_name("SHA256SUMS").read_text().split("  ")[0]
             self.assertNotIn("\r", archive.with_name("SHA256SUMS").read_text())
             self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), checksum)
+            metadata = json.loads(archive.with_name("build-metadata.json").read_text())
+            self.assertEqual(metadata["platform"], platform)
+            self.assertEqual(metadata["runtimeStamp"], "d615e931f06bb5a4")
 
 
 if __name__ == "__main__":

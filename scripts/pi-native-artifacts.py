@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,7 +117,18 @@ export default function () {
     print("PASS public pi-bolt, private Pi OS identity, argv forwarding, compiled image and image worker")
 
 
+def release_variant(platform):
+    """The variant folder name the updater and installers expect: pi-bolt-<platform>-<variant>, holding the runtime."""
+    return "pi-bolt-win32-x64-jit" if platform == "win32-x64" else "pi-bolt-darwin-arm64-jit"
+
+
 def archive(directory, platform):
+    """Stage the release-form archive the updater chain expects.
+
+    The local layout (launchers beside runtime/) is for smoke checks only. The release archive carries one variant folder
+    (pi-bolt-<platform>-<variant>/ with the native Pi and its adjacent assets): `pi-bolt update` on Windows unpacks
+    pi-bolt-win32-<variant>.zip and installs that folder in place; the installers lay the same folder into the install dir.
+    """
     assert platform in ("win32-x64", "darwin-arm64"), platform
     check_layout(directory, platform)
     runtime = ROOT / ".work/runtime" / ("bun.exe" if platform == "win32-x64" else "bun")
@@ -129,19 +142,30 @@ def archive(directory, platform):
         "boltVersion": (ROOT / "VERSION").read_text().strip(),
     }
     (directory / "build-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    paths = sorted(p for p in directory.rglob("*") if p.is_file() and p != directory / "SHA256SUMS")
-    sums = "".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(directory).as_posix()}\n"
-                   for p in paths)
-    # LF only: shasum on macOS rejects CRLF checksum lines.
-    (directory / "SHA256SUMS").write_text(sums, newline="\n")
+
+    variant = release_variant(platform)
+    stage = ROOT / ".work/pi-native-release"
+    shutil.rmtree(stage, ignore_errors=True)
+    inner = stage / variant
+    shutil.copytree(directory / "runtime", inner)
     artifacts = ROOT / "out/pi-native-artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    target = artifacts / f"pi-native-{platform}.tar.gz"
-    # tar, rather than upload-artifact's zip, preserves launcher/helper and native executable modes.
-    subprocess.run(["tar", "-czf", str(target), "-C", str(directory.parent), directory.name], check=True)
+    if platform == "win32-x64":
+        target = artifacts / f"{variant}.zip"
+        with zipfile.ZipFile(target, "w") as zipped:
+            for path in sorted(p for p in inner.rglob("*") if p.is_file()):
+                arcname = path.relative_to(stage).as_posix()
+                zipped.write(path, arcname)
+                if path.suffix in (".exe", ".dll", ".node") or path.parent == inner:
+                    zipped.getinfo(arcname).external_attr = 0o755 << 16
+    else:
+        target = artifacts / f"{variant}.tar.gz"
+        # tar preserves the launcher/helper and native executable modes the install needs.
+        subprocess.run(["tar", "-czf", str(target), "-C", str(stage), variant], check=True)
+    shutil.rmtree(stage, ignore_errors=True)
     (artifacts / "SHA256SUMS").write_text(f"{hashlib.sha256(target.read_bytes()).hexdigest()}  {target.name}\n", newline="\n")
     (artifacts / "build-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    print(f"Archived full output: {target}")
+    print(f"Archived release output: {target}")
 
 
 if __name__ == "__main__":

@@ -92,10 +92,20 @@ subagent runs do not. Competing Pi reporters remain suppressed.
 
 ## Updates and verification
 
-Application update URLs point to **`saifymatteo/Pi-Bolt`**, not upstream. Until a
-separately approved signed fork release exists, download a new CI artifact rather
-than expecting `pi-bolt update` to install one. Compiler-runtime downloads still
-use verified upstream releases; they are not application updates.
+Application update URLs point to **`saifymatteo/Pi-Bolt`**, not upstream. A
+`pi-native-v*` release carries `install.ps1` / `install.sh`, its archives, and a
+`SHA256SUMS` whose first line names the version and whose Ed25519 signature
+(`SHA256SUMS.sig`, signed in CI by the `PI_NATIVE_RELEASE_KEY` secret; the matching
+public key is `keys/pi-native-release.pub`, also built into the executable) covers
+the installers and archives. The TUI's update notice and `pi-bolt update` resolve
+this fork's `pi-native-v*` tags, including `-trial` prereleases on the beta channel.
+Compiler-runtime downloads still use verified upstream releases; they are not
+application updates.
+
+Release archives carry one variant folder (`pi-bolt-win32-x64-jit/` with the private
+`pi.exe`, or `pi-bolt-darwin-arm64-jit/` with its `pi` launcher and `pi-bin`); the
+installers lay that folder into `~/.pi-bolt` and link the public `pi-bolt` shim to
+it, keeping the replaced build beside it as `<folder>.previous` for `--rollback`.
 
 Useful source checks, from the repository root:
 

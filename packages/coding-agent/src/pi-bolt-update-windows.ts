@@ -58,9 +58,9 @@ export function sumsSignatureValid(
 	}
 }
 
-/** The release SHA256SUMS says it is ("# pi-bolt 0.9.6" on its first line), or undefined. */
+/** The release SHA256SUMS says it is ("# pi-bolt 0.9.6" or "# pi-bolt 1.0.9-trial.3" on its first line), or undefined. */
 export function sumsVersion(sums: string): string | undefined {
-	return /^# pi-bolt (\d+\.\d+\.\d+)\r?$/.exec(sums.split("\n", 1)[0] ?? "")?.[1];
+	return /^# pi-bolt (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\r?$/.exec(sums.split("\n", 1)[0] ?? "")?.[1];
 }
 
 /** The SHA-256 SHA256SUMS lists for `name` (lowercase hex), or undefined. */
@@ -241,7 +241,7 @@ export async function download(url: string, what: string | undefined): Promise<B
 
 /** Where release `version`'s files are downloaded from. */
 export function releaseDownloadBase(version: string): string {
-	return `${REPO}/releases/download/bolt-v${version}`;
+	return `${REPO}/releases/download/pi-native-v${version}`;
 }
 
 /**

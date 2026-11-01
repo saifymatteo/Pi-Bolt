@@ -100,6 +100,13 @@ describe("the latest Pi-Bolt release", () => {
 			"1.0.3",
 		);
 		expect(piBoltVersionOfReleaseUrl("/saifymatteo/Pi-Bolt/releases/tag/bolt-v1.0.3")).toBe("1.0.3");
+		// This fork's releases are pi-native-v*; trials carry a prerelease suffix.
+		expect(piBoltVersionOfReleaseUrl("https://github.com/saifymatteo/Pi-Bolt/releases/tag/pi-native-v1.0.9")).toBe(
+			"1.0.9",
+		);
+		expect(
+			piBoltVersionOfReleaseUrl("https://github.com/saifymatteo/Pi-Bolt/releases/tag/pi-native-v1.0.9-trial.3"),
+		).toBe("1.0.9-trial.3");
 		expect(piBoltVersionOfReleaseUrl("https://github.com/saifymatteo/Pi-Bolt/releases")).toBeUndefined();
 		expect(piBoltVersionOfReleaseUrl("https://github.com/saifymatteo/Pi-Bolt/releases/tag/v1.4.0")).toBeUndefined();
 		expect(piBoltVersionOfReleaseUrl("https://github.com/login?return_to=x")).toBeUndefined();

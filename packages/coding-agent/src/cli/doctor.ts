@@ -342,13 +342,14 @@ async function fetchBytes(url: string): Promise<{ status: number; body?: Buffer 
 
 async function checkReleaseSignature(): Promise<SignatureResult | undefined> {
 	if (!PIBOLT) return undefined;
-	const base = `${PIBOLT_RELEASES_URL}/download/bolt-v${PIBOLT.version}`;
+	const base = `${PIBOLT_RELEASES_URL}/download/pi-native-v${PIBOLT.version}`;
 	try {
 		const [sums, signature] = await Promise.all([
 			fetchBytes(`${base}/SHA256SUMS`),
 			fetchBytes(`${base}/SHA256SUMS.sig`),
 		]);
-		if (sums.status === 404) return { status: "not-released", detail: `there is no release bolt-v${PIBOLT.version}` };
+		if (sums.status === 404)
+			return { status: "not-released", detail: `there is no release pi-native-v${PIBOLT.version}` };
 		if (!sums.body) return { status: "error", detail: `SHA256SUMS: HTTP ${sums.status}` };
 		if (!signature.body) return { status: "bad", detail: `the release has no signature (HTTP ${signature.status})` };
 		return verifyReleaseSums(sums.body, signature.body, PIBOLT.version, archiveNames());
@@ -429,10 +430,10 @@ async function installSection(
 	if (offline) rows.push(["release", "not checked (offline)"]);
 	else if (!result) rows.push(["release", "not checked"]);
 	else {
-		rows.push(["release", `bolt-v${PIBOLT.version}: ${result.detail}`]);
+		rows.push(["release", `pi-native-v${PIBOLT.version}: ${result.detail}`]);
 		if (result.status === "bad") {
 			report.problems.push(
-				`Release bolt-v${PIBOLT.version}: ${result.detail}. Reinstall from ${PIBOLT_RELEASES_URL} and report it.`,
+				`Release pi-native-v${PIBOLT.version}: ${result.detail}. Reinstall from ${PIBOLT_RELEASES_URL} and report it.`,
 			);
 		}
 	}

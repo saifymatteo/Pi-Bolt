@@ -88,12 +88,12 @@ export function piBoltInstallerProcess(installerFile?: string): { command: strin
 	};
 }
 export const PIBOLT_RELEASES_URL = "https://github.com/saifymatteo/Pi-Bolt/releases";
-/** The key releases' SHA256SUMS are signed with (keys/release.pub; the installers carry it too). */
+/** The key this fork's pi-native-v* releases' SHA256SUMS are signed with (the CI secret PI_NATIVE_RELEASE_KEY signs them). */
 export const PIBOLT_RELEASE_KEY = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=
+MCowBQYDK2VwAyEAZGhPyefuKvxIMg8gyYZ9SBxMnUFPg6L3+QhaBazZKps=
 -----END PUBLIC KEY-----
 `;
-/** Redirects to the latest release's page (.../releases/tag/bolt-v1.0.2); not counted against GitHub's API limit. */
+/** Redirects to the latest release's page (.../releases/tag/pi-native-v1.0.2); not counted against GitHub's API limit. */
 export const PIBOLT_LATEST_RELEASE_URL = `${PIBOLT_RELEASES_URL}/latest`;
 /** The releases, pre-releases among them, as an Atom feed; not counted against GitHub's API limit either. */
 export const PIBOLT_RELEASES_FEED = `${PIBOLT_RELEASES_URL}.atom`;
@@ -141,10 +141,10 @@ export function parsePiBoltBuild(build: string | undefined): PiBoltBuild | undef
 	return { version, variant, jit: jit === "jit-on", ...(runtimeStamp ? { runtimeStamp } : {}) };
 }
 
-/** "0.3.1" from the release tag "bolt-v0.3.1"; undefined for anything else. */
+/** "0.3.1" from the release tag "bolt-v0.3.1"; "1.0.9-trial.3" from this fork's "pi-native-v1.0.9-trial.3"; undefined for anything else. */
 export function piBoltVersionOfTag(tag: unknown): string | undefined {
 	if (typeof tag !== "string") return undefined;
-	const match = /^bolt-v(\d+\.\d+\.\d+)$/.exec(tag.trim());
+	const match = /^(?:bolt-v|pi-native-v)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(tag.trim());
 	return match ? match[1] : undefined;
 }
 
@@ -321,7 +321,7 @@ export function piBoltUpdateEnvironment(version: string): NodeJS.ProcessEnv {
 		PIBOLT_NO_START: "1",
 		PIBOLT_NO_PATH: "1",
 		PIBOLT_VARIANT: PIBOLT?.variant ?? "x64",
-		PIBOLT_VERSION: `bolt-v${version}`,
+		PIBOLT_VERSION: `pi-native-v${version}`,
 		PIBOLT_INSTALL: piBoltInstallDir() ?? process.env.PIBOLT_INSTALL ?? join(homedir(), ".pi-bolt"),
 	};
 }

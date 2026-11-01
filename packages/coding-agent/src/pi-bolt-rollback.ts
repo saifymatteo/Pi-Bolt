@@ -142,7 +142,9 @@ export function rollbackPiBolt(): number {
 		console.error(
 			`This Pi-Bolt was installed with ${manager.name}, which keeps no earlier build to go back to. To run another version, uninstall it and install that version with the installer:`,
 		);
-		console.error(`  ${manager.uninstall} && curl -fsSL ${PIBOLT_INSTALL_URL} | PIBOLT_VERSION=bolt-v<version> sh`);
+		console.error(
+			`  ${manager.uninstall} && curl -fsSL ${PIBOLT_INSTALL_URL} | PIBOLT_VERSION=pi-native-v<version> sh`,
+		);
 		return 1;
 	}
 	if (!piBoltInstallDir()) {

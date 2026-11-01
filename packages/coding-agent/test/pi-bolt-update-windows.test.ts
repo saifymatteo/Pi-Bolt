@@ -75,7 +75,9 @@ describe("isInProfile", () => {
 
 describe("releaseDownloadBase", () => {
 	test("downloads application releases only from the fork", () => {
-		expect(releaseDownloadBase("1.0.8")).toBe("https://github.com/saifymatteo/Pi-Bolt/releases/download/bolt-v1.0.8");
+		expect(releaseDownloadBase("1.0.8")).toBe(
+			"https://github.com/saifymatteo/Pi-Bolt/releases/download/pi-native-v1.0.8",
+		);
 	});
 });
 

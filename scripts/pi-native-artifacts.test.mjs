@@ -19,7 +19,9 @@ test("artifact workflow is restricted to the fork branch with read-only permissi
 	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || startsWith(github.ref, 'refs/tags/pi-native-v'))");
 	assert.deepEqual(Object.keys(workflow.jobs), ["artifacts", "release"]);
 	assert.equal(job.permissions, undefined);
-	assert.doesNotMatch(source, /secrets\.|write-all|id-token:|GITHUB_PATH|\$env:PATH\s*=|export PATH=|npm publish/);
+	// The build jobs get no credentials at all; only the release job may sign (its own key, write-scoped).
+	assert.doesNotMatch(scripts, /secrets\.|write-all|id-token:|GITHUB_PATH|\$env:PATH\s*=|export PATH=|npm publish/);
+	assert.match(source, /secrets\.PI_NATIVE_RELEASE_KEY/);
 });
 
 test("only Windows x64 and native macOS ARM64 build, with the repository's pinned actions", () => {
@@ -88,7 +90,7 @@ test("offline preparation, JIT on, native regressions and full-output archive ar
 	assert.equal(upload.if, undefined);
 });
 
-test("a pi-native-v* tag publishes both archives as a verified prerelease", () => {
+test("a pi-native-v* tag publishes both archives as a signed release", () => {
 	const release = workflow.jobs.release;
 	assert.equal(release.needs, "artifacts");
 	assert.equal(release["runs-on"], "ubuntu-latest");
@@ -100,6 +102,14 @@ test("a pi-native-v* tag publishes both archives as a verified prerelease", () =
 		assert.match(runs, new RegExp(`sha256sum -c SHA256SUMS`));
 		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
 	}
+	// The updater reads the version from the first line and the installers and archives by name.
+	assert.match(runs, /cp stage\/win32-x64\/pi-bolt-win32-x64-jit\.zip stage\/darwin-arm64\/pi-bolt-darwin-arm64-jit\.tar\.gz out\/release\//);
+	assert.match(runs, /echo "# pi-bolt \$version"/);
+	assert.match(runs, /sha256sum install\.ps1 install\.sh pi-bolt-win32-x64-jit\.zip pi-bolt-darwin-arm64-jit\.tar\.gz/);
+	// Signed with the fork key (CI secret); the built-in public key must take the signature before publishing.
+	assert.match(runs, /pkeyutl -sign -rawin -in out\/release\/SHA256SUMS -inkey out\/release-signing\.key -out out\/release\/SHA256SUMS\.sig/);
+	assert.match(runs, /pkeyutl -verify -pubin -inkey keys\/pi-native-release\.pub/);
+	assert.match(runs, /rm out\/release-signing\.key/);
 	// Trial tags stay prereleases; plain pi-native-v* tags publish as full releases marked Latest.
 	assert.match(runs, /case "\$GITHUB_REF_NAME" in \*-trial\*\) flags\+=\(--prerelease\) ;; esac/);
 	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\* --repo "\$GITHUB_REPOSITORY" "\$\{flags\[@\]\}"/);

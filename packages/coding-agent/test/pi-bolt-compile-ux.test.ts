@@ -51,7 +51,7 @@ describe("pi-bolt compile works offline once the release's files are cached (#6,
 	const sums = Buffer.from(
 		`# pi-bolt 0.9.0\n${sha256(runtime)}  pi-bolt-runtime-linux-x64.tar.gz\n${sha256(kit)}  pi-bolt-kit-linux-x64.tar.gz\n`,
 	);
-	const base = "https://example.invalid/download/bolt-v0.9.0";
+	const base = "https://example.invalid/download/pi-native-v0.9.0";
 
 	let served: Map<string, Buffer>;
 	let requested: string[];

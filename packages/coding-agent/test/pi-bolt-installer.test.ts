@@ -142,11 +142,11 @@ describe.skipIf(process.platform === "win32")("runReleaseInstaller", () => {
 		const script = Buffer.from(`printf '%s\\n%s\\n' "$0" "$PIBOLT_VERSION" > '${marker}'\nexit 3\n`);
 		const status = await runReleaseInstaller(
 			{ name: "install.sh", script },
-			{ ...process.env, PIBOLT_VERSION: `bolt-v${VERSION}` },
+			{ ...process.env, PIBOLT_VERSION: `pi-native-v${VERSION}` },
 		);
 		expect(status).toBe(3);
 		const [file, version] = readFileSync(marker, "utf8").trim().split("\n");
-		expect(version).toBe(`bolt-v${VERSION}`);
+		expect(version).toBe(`pi-native-v${VERSION}`);
 		expect(file.endsWith("/install.sh")).toBe(true);
 		expect(existsSync(dirname(file))).toBe(false);
 		// Nothing was downloaded: the script is the one given.
@@ -227,7 +227,7 @@ describe("piBoltUpdateEnvironment", () => {
 			expect(env.PIBOLT_EXTENSIONS).toBe("no");
 			expect(env.NOT_PIBOLT_VARIABLE).toBe("kept");
 			expect(env.PATH).toBe(process.env.PATH);
-			expect(env.PIBOLT_VERSION).toBe(`bolt-v${VERSION}`);
+			expect(env.PIBOLT_VERSION).toBe(`pi-native-v${VERSION}`);
 			expect(env.PIBOLT_YES).toBe("1");
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
