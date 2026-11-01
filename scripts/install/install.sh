@@ -44,6 +44,27 @@ mkdir -p "$BIN_DIR"
 # A shim, not a copy: updates replace the runtime, the shim keeps working.
 printf '#!/bin/sh\nexec "%s/pi" "$@"\n' "$DIR" > "$BIN_DIR/pi-bolt"
 chmod 755 "$BIN_DIR/pi-bolt"
+# Conditional takeover: a real pi on PATH stays in charge; without one, pi runs this compiled build. Herdr's
+# restore runs `pi --session <transcript>`, so this also makes restart resume Pi-Bolt sessions when Node Pi is
+# absent. Candidates carrying our own marker are skipped so two installs cannot forward to each other.
+cat > "$BIN_DIR/pi" <<'EOF'
+#!/bin/sh
+# pi shim installed by pi-bolt: real pi on PATH wins, else the compiled build (PIBOLT_FALLBACK).
+self_dir=$(CDPATH='' cd "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=
+saved_IFS=$IFS
+IFS=':'
+for d in $PATH; do
+	IFS=$saved_IFS
+	case "$d" in ''|"${self_dir:-__none__}") continue ;; esac
+	[ -x "$d/pi" ] && [ ! -d "$d/pi" ] || continue
+	grep -q 'PIBOLT_FALLBACK' "$d/pi" 2>/dev/null && continue
+	exec "$d/pi" "$@"
+done
+exec "__PIBOLT_FALLBACK__" "$@"
+EOF
+esc=$(printf '%s' "$DIR/pi" | sed 's/[\\&|]/\\&/g')
+sed -i.bak "s|__PIBOLT_FALLBACK__|$esc|" "$BIN_DIR/pi" && rm -f "$BIN_DIR/pi.bak"
+chmod 755 "$BIN_DIR/pi"
 case ":$PATH:" in
 	*":$BIN_DIR:"*) ;;
 	*) if [ -z "${PIBOLT_NO_PATH:-}" ]; then echo "note: $BIN_DIR is not on your PATH; add it to your shell profile" >&2; fi ;;

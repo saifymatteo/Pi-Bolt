@@ -76,6 +76,35 @@ try {
 	Set-Content -LiteralPath (Join-Path $BinDir 'pi-bolt.cmd') -Encoding Ascii -Value (
 		"@echo off`r`n`"$installedExe`" %*`r`nexit /b %errorlevel%`r`n")
 
+	# Conditional takeover: a real pi on PATH stays in charge; without one, pi runs this compiled build. Herdr's
+	# restore runs `pi --session <transcript>`, so this is also what makes restart resume Pi-Bolt sessions when Node
+	# Pi is absent. Candidates that carry our own marker are skipped so two installs cannot forward to each other.
+	$piShim = @'
+@echo off
+setlocal EnableExtensions
+set "PIBOLT_FALLBACK=__PIBOLT_FALLBACK__"
+set "PIBOLT_RESOLVED="
+for /f "usebackq delims=" %%F in (`where pi 2^>nul`) do (
+	if not defined PIBOLT_RESOLVED (
+		if /i not "%%~fF"=="%~f0" if /i not "%%~dpF"=="%~dp0" (
+			findstr /i /m /c:"PIBOLT_FALLBACK" "%%~fF" >nul 2>&1
+			if errorlevel 1 (
+				if /i "%%~xF"==".exe" set "PIBOLT_RESOLVED=%%~fF"
+				if /i not defined PIBOLT_RESOLVED if /i "%%~xF"==".cmd" set "PIBOLT_RESOLVED=%%~fF"
+				if /i not defined PIBOLT_RESOLVED if /i "%%~xF"==".bat" set "PIBOLT_RESOLVED=%%~fF"
+			)
+		)
+	)
+)
+if not defined PIBOLT_RESOLVED goto pibolt_fallback
+call "%PIBOLT_RESOLVED%" %*
+exit /b %errorlevel%
+:pibolt_fallback
+"%PIBOLT_FALLBACK%" %*
+exit /b %errorlevel%
+'@
+	Set-Content -LiteralPath (Join-Path $BinDir 'pi.cmd') -Encoding Ascii -Value $piShim.Replace('__PIBOLT_FALLBACK__', $installedExe)
+
 	if (-not ($NoPathUpdate -or $env:PIBOLT_NO_PATH)) {
 		$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 		if ($userPath -notlike "*$BinDir*") {

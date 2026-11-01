@@ -117,6 +117,16 @@ test("a pi-native-v* tag publishes both archives as a signed release", () => {
 	assert.doesNotMatch(runs, /npm publish|homebrew|crates|cargo publish/);
 });
 
+test("installers write the conditional pi takeover shim", () => {
+	const ps1 = readFileSync("scripts/install/install.ps1", "utf8");
+	assert.match(ps1, /Join-Path \$BinDir 'pi\.cmd'/);
+	assert.match(ps1, /PIBOLT_FALLBACK/);
+	assert.match(ps1, /where pi 2\^>nul/);
+	const sh = readFileSync("scripts/install/install.sh", "utf8");
+	assert.match(sh, /"\$BIN_DIR\/pi"/);
+	assert.match(sh, /PIBOLT_FALLBACK/);
+});
+
 test("runtime stamp uses an LF header on Windows and Unix", () => {
 	const header = execFileSync("python3", ["-c", 'import json, sys; s = json.load(open("sources.json")); sys.stdout.buffer.write((json.dumps({"webkit": s["webkit"], "bun": s["bun"]}, sort_keys=True) + "\\n").encode("utf-8"))']);
 	const files = ["patches/webkit.patch", "patches/bun.patch", "scripts/build-runtime.sh", "scripts/build-runtime.ps1",

@@ -66,20 +66,22 @@ those applications. The rebased artifacts still require their own validation.
 
 ## Restart is deferred for these trial artifacts
 
-**Do not rely on Herdr restoring a session into the compiled runtime yet.** The
-current reporter uses canonical Pi metadata, so Herdr can restore it with
-`pi --session <transcript>` and select your original Node Pi. Keeping `pi` and
-`pi-bolt` separate does not change that default.
+**Restart resolves through the conditional `pi` shim the installer writes.**
+Herdr restores a Pi session with `pi --session <transcript>`. The installer also
+writes a `pi` shim next to `pi-bolt` that runs a real Pi whenever one is on PATH
+and falls back to the compiled build otherwise — so with no Node Pi installed,
+a restart resumes the compiled session; with Node Pi installed, restart opens
+Node Pi, which reads the same transcript. Typing `pi` follows the same rule.
 
 Herdr 0.9.5 can acknowledge a custom restart instruction without retaining it;
-its public API does not expose the retained command for verification. These trial
-artifacts deliberately do not claim that compiled-session restart is solved.
-Opening replies and sending feedback can be tested independently of restart.
+its public API does not expose the retained command for verification. When it
+retains our `pi-bolt --session <transcript>` instruction, restart uses it
+directly; when it falls back, the conditional `pi` shim above decides. Install
+Node Pi only if you want it to win restarts.
 
-After a restart, exit a restored Node Pi before manually reopening the same
-transcript with `pi-bolt --session <transcript>`. Do not run both versions against
-the same transcript simultaneously. A future reliable restart implementation must
-preserve the `pi-bolt` command without taking over global `pi`.
+After a restart, do not run both versions against the same transcript
+simultaneously: exit a restored session before manually reopening the transcript
+with `pi-bolt --session <transcript>`.
 
 **Do not restart your working Herdr session merely to test an extracted artifact.**
 Windows restart trials also require PowerShell: Herdr 0.9.5 uses single-quoted
