@@ -14,12 +14,12 @@ const scripts = steps.map((step) => step.run ?? "").join("\n");
 
 test("artifact workflow is restricted to the fork branch with read-only permissions", () => {
 	assert.deepEqual(Object.keys(workflow.on).sort(), ["push", "workflow_dispatch"]);
-	assert.deepEqual(workflow.on.push, { branches: ["feat/pi-native-identity"] });
+	assert.deepEqual(workflow.on.push, { branches: ["feat/pi-native-identity"], tags: ["pi-native-v*"] });
 	assert.deepEqual(workflow.permissions, { contents: "read" });
-	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && github.ref == 'refs/heads/feat/pi-native-identity'");
-	assert.deepEqual(Object.keys(workflow.jobs), ["artifacts"]);
+	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || startsWith(github.ref, 'refs/tags/pi-native-v'))");
+	assert.deepEqual(Object.keys(workflow.jobs), ["artifacts", "release"]);
 	assert.equal(job.permissions, undefined);
-	assert.doesNotMatch(source, /secrets\.|write-all|id-token:|contents: write|GITHUB_PATH|\$env:PATH\s*=|export PATH=|gh release|npm publish|install\.ps1|install\.sh/);
+	assert.doesNotMatch(source, /secrets\.|write-all|id-token:|GITHUB_PATH|\$env:PATH\s*=|export PATH=|npm publish|install\.ps1|install\.sh/);
 });
 
 test("only Windows x64 and native macOS ARM64 build, with the repository's pinned actions", () => {
@@ -42,7 +42,7 @@ test("only Windows x64 and native macOS ARM64 build, with the repository's pinne
 });
 
 test("upstream signed runtime is pinned and its original adjacent stamp gates every build", () => {
-	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.0.8");
+	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.0.9");
 	assert.match(scripts, /bash scripts\/fetch-runtime\.sh --version "\$PI_NATIVE_RUNTIME_TAG"/);
 	assert.match(scripts, /https:\/\/github\.com\/opensec-git\/Pi-Bolt\/releases\/download/);
 	assert.match(scripts, /pkeyutl -verify -pubin -inkey keys\\release\.pub/);
@@ -86,6 +86,22 @@ test("offline preparation, JIT on, native regressions and full-output archive ar
 	assert.match(upload.with.path, /SHA256SUMS/);
 	assert.match(upload.with.path, /build-metadata\.json/);
 	assert.equal(upload.if, undefined);
+});
+
+test("a pi-native-v* tag publishes both archives as a verified prerelease", () => {
+	const release = workflow.jobs.release;
+	assert.equal(release.needs, "artifacts");
+	assert.equal(release["runs-on"], "ubuntu-latest");
+	assert.equal(release.if, "github.repository == 'saifymatteo/Pi-Bolt' && startsWith(github.ref, 'refs/tags/pi-native-v')");
+	assert.deepEqual(release.permissions, { contents: "write" });
+	const runs = release.steps.map((step) => step.run ?? "").join("\n");
+	for (const platform of ["win32-x64", "darwin-arm64"]) {
+		assert.match(runs, new RegExp(`gh run download .*--name pi-native-${platform}`));
+		assert.match(runs, new RegExp(`sha256sum -c SHA256SUMS`));
+		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
+	}
+	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\*.*--prerelease/s);
+	assert.doesNotMatch(runs, /npm publish|install\.ps1|install\.sh|homebrew|crates|cargo publish/);
 });
 
 test("runtime stamp uses an LF header on Windows and Unix", () => {
