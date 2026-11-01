@@ -17,17 +17,23 @@ The startup hint remains:
 ## Get a test build
 
 The fork's **Pi native artifacts** Actions workflow targets Windows x64 and macOS
-Apple Silicon, including M2. Download your platform's artifact from a successful
-run in `saifymatteo/Pi-Bolt`.
+Apple Silicon, including M2. Two ways to get a build from `saifymatteo/Pi-Bolt`:
+
+- **Prerelease (recommended):** pushing a `pi-native-v*` tag builds both platforms
+  and publishes a GitHub prerelease at that tag with the archives, a combined LF
+  `SHA256SUMS`, and per-platform build metadata.
+- **CI artifact:** every push to `feat/pi-native-identity` uploads per-platform
+  artifacts to the workflow run, kept for 14 days.
 
 Extract the **complete archive** into its own directory. The public command is
 `pi-bolt.cmd` on Windows or `pi-bolt` on macOS. Keep its private `runtime` directory
-and all adjacent assets intact; copying just an executable is insufficient.
+and all adjacent assets intact; copying just an executable is insufficient. Verify
+first with `sha256sum -c SHA256SUMS`.
 
-These are CI test artifacts, not published releases or installers. Extracting one
-does not replace installed Pi or change PATH. A macOS artifact is not notarized;
-Gatekeeper may block downloaded code. Assess the artifact before changing its
-quarantine attributes; the workflow does not remove quarantine for you.
+These are trial builds, not installers. Extracting one does not replace installed
+Pi or change PATH. A macOS archive is not notarized; Gatekeeper may block
+downloaded code. Assess the artifact before changing its quarantine attributes;
+the workflow does not remove quarantine for you.
 
 ## Try feedback in a new pane
 
