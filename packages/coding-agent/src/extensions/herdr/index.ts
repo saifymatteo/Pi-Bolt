@@ -51,7 +51,6 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 		let sessionFile: string | undefined;
 		let sessionId: string | undefined;
 		let agentActive = false;
-		let uiPrompt = false;
 		const blockedLabels: string[] = [];
 		const runningSubagents = new Set<string>();
 		let backgroundBusy = false;
@@ -73,9 +72,10 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 		}
 
 		function desiredState(): { state: AgentState; message?: string } {
+			// UI prompts are not a blocked signal: pi-atelier hosts its sidebar as a persistent ui.custom overlay for the
+			// whole session, and stock Herdr's Pi integration never maps ui_prompt to blocked. Extensions that wait for the
+			// user say so on the herdr:blocked channel instead.
 			if (blockedLabels.length > 0) return { state: "blocked", message: blockedLabels[blockedLabels.length - 1] };
-			// A dialog during a run is a tool or extension waiting for the user; one opened at the prompt is the user's own.
-			if (uiPrompt && agentActive) return { state: "blocked" };
 			if (agentActive || backgroundBusy || runningSubagents.size > 0) return { state: "working" };
 			return { state: "idle" };
 		}
@@ -166,16 +166,6 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 		pi.on("agent_settled", (_event, ctx) => {
 			if (!reporting || !ctx.isIdle()) return;
 			agentActive = false;
-			publish();
-		});
-
-		pi.on("ui_prompt_start", () => {
-			uiPrompt = true;
-			publish();
-		});
-
-		pi.on("ui_prompt_end", () => {
-			uiPrompt = false;
 			publish();
 		});
 

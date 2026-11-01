@@ -199,18 +199,19 @@ describe("Herdr extension", () => {
 			agent_session_path: "/work/s.jsonl",
 		});
 
+		// A persistent custom overlay opened before the run (pi-atelier hosts its sidebar this way) is not a block:
+		// stock Herdr's Pi integration never maps ui_prompt to blocked, so neither do we.
+		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" });
 		run.setIdle(false);
 		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
 		await until(() => run.states().length === 2);
-		// A dialog in the middle of a run is the agent waiting for the user.
-		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm" });
-		await until(() => run.states().length === 3);
-		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm" });
-		await until(() => run.states().length === 4);
+		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "custom" });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(run.states()).toEqual(["idle", "working"]);
 		run.setIdle(true);
 		await run.fire("agent_settled", { type: "agent_settled", aborted: false }, run.ctx);
-		await until(() => run.states().length === 5);
-		expect(run.states()).toEqual(["idle", "working", "blocked", "working", "idle"]);
+		await until(() => run.states().length === 3);
+		expect(run.states()).toEqual(["idle", "working", "idle"]);
 		for (const request of run.herdr.requests) {
 			expect(request.params).not.toHaveProperty("resume_argv");
 			expect(request.params).toMatchObject({
@@ -509,11 +510,10 @@ describe("Herdr extension", () => {
 		expect(second).toBeGreaterThan(first);
 
 		refuse = false;
-		// A dialog at the prompt leaves the state as it was; the state Herdr refused is sent again.
-		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "select" });
+		// The state Herdr refused is sent again on the next publish; a no-op busy update triggers one.
+		run.emit("herdr:busy", { active: false });
 		await until(() => run.states().length === 3);
 		// Once Herdr took it, the same state is not sent again.
-		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "select" });
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(run.states()).toEqual(["idle", "idle", "idle"]);
 	});
