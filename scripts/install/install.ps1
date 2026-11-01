@@ -69,9 +69,12 @@ try {
 	Copy-Item $build $VariantDir -Recurse
 
 	New-Item -ItemType Directory -Force $BinDir | Out-Null
-	# A shim, not a copy: updates replace the runtime, the shim keeps working.
+	# A shim, not a copy: updates replace the runtime, the shim keeps working. It must point at the installed build,
+	# not the temporary unpack this script deletes on exit.
+	$installedExe = Join-Path $VariantDir 'pi.exe'
+	if (-not (Test-Path $installedExe)) { throw 'the installed executable is missing after install' }
 	Set-Content -LiteralPath (Join-Path $BinDir 'pi-bolt.cmd') -Encoding Ascii -Value (
-		"@echo off`r`n`"$exe`" %*`r`nexit /b %errorlevel%`r`n")
+		"@echo off`r`n`"$installedExe`" %*`r`nexit /b %errorlevel%`r`n")
 
 	if (-not ($NoPathUpdate -or $env:PIBOLT_NO_PATH)) {
 		$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
