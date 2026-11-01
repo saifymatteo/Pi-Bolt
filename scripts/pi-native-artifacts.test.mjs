@@ -19,7 +19,7 @@ test("artifact workflow is restricted to the fork branch with read-only permissi
 	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || startsWith(github.ref, 'refs/tags/pi-native-v'))");
 	assert.deepEqual(Object.keys(workflow.jobs), ["artifacts", "release"]);
 	assert.equal(job.permissions, undefined);
-	assert.doesNotMatch(source, /secrets\.|write-all|id-token:|GITHUB_PATH|\$env:PATH\s*=|export PATH=|npm publish|install\.ps1|install\.sh/);
+	assert.doesNotMatch(source, /secrets\.|write-all|id-token:|GITHUB_PATH|\$env:PATH\s*=|export PATH=|npm publish/);
 });
 
 test("only Windows x64 and native macOS ARM64 build, with the repository's pinned actions", () => {
@@ -101,7 +101,8 @@ test("a pi-native-v* tag publishes both archives as a verified prerelease", () =
 		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
 	}
 	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\*.*--prerelease/s);
-	assert.doesNotMatch(runs, /npm publish|install\.ps1|install\.sh|homebrew|crates|cargo publish/);
+	assert.match(runs, /cp scripts\/install\/install\.ps1 scripts\/install\/install\.sh out\/release\//);
+	assert.doesNotMatch(runs, /npm publish|homebrew|crates|cargo publish/);
 });
 
 test("runtime stamp uses an LF header on Windows and Unix", () => {

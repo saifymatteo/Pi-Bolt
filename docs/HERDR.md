@@ -28,7 +28,9 @@ Apple Silicon, including M2. Two ways to get a build from `saifymatteo/Pi-Bolt`:
 Extract the **complete archive** into its own directory. The public command is
 `pi-bolt.cmd` on Windows or `pi-bolt` on macOS. Keep its private `runtime` directory
 and all adjacent assets intact; copying just an executable is insufficient. Verify
-first with `sha256sum -c SHA256SUMS`.
+first with `sha256sum -c SHA256SUMS`. The releases also carry `install.ps1` /
+`install.sh`, which download, verify, and install the `pi-bolt` launcher for you
+without touching Node `pi`.
 
 These are trial builds, not installers. Extracting one does not replace installed
 Pi or change PATH. A macOS archive is not notarized; Gatekeeper may block
