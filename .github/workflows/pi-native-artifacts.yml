@@ -173,7 +173,7 @@ jobs:
         run: |
           mkdir -p out/release
           cp stage/win32-x64/pi-native-win32-x64.tar.gz stage/darwin-arm64/pi-native-darwin-arm64.tar.gz out/release/
-          cp install.ps1 install.sh out/release/
+          cp scripts/install/install.ps1 scripts/install/install.sh out/release/
           cat stage/win32-x64/SHA256SUMS stage/darwin-arm64/SHA256SUMS > out/release/SHA256SUMS
           cp stage/win32-x64/build-metadata.json out/release/build-metadata-win32-x64.json
           cp stage/darwin-arm64/build-metadata.json out/release/build-metadata-darwin-arm64.json
