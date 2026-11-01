@@ -122,9 +122,11 @@ test("installers write the conditional pi takeover shim", () => {
 	assert.match(ps1, /Join-Path \$BinDir 'pi\.cmd'/);
 	assert.match(ps1, /PIBOLT_FALLBACK/);
 	assert.match(ps1, /where pi 2\^>nul/);
+	assert.match(ps1, /pibolt_consider/);
 	const sh = readFileSync("scripts/install/install.sh", "utf8");
 	assert.match(sh, /"\$BIN_DIR\/pi"/);
 	assert.match(sh, /PIBOLT_FALLBACK/);
+	assert.match(sh, /case "\$d\/pi" in "\$fallback"\) continue/);
 });
 
 test("runtime stamp uses an LF header on Windows and Unix", () => {
