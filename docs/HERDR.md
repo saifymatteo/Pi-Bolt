@@ -100,7 +100,10 @@ public key is `keys/pi-native-release.pub`, also built into the executable) cove
 the installers and archives. The TUI's update notice and `pi-bolt update` resolve
 this fork's `pi-native-v*` tags, including `-trial` prereleases on the beta channel.
 Compiler-runtime downloads still use verified upstream releases; they are not
-application updates.
+application updates. One transitional note: builds older than the first release
+signed with `pi-native-release.pub` carry the upstream release key, so their
+`pi-bolt update` refuses this release's signature — run the installer once; from
+then on `pi-bolt update` works.
 
 Release archives carry one variant folder (`pi-bolt-win32-x64-jit/` with the private
 `pi.exe`, or `pi-bolt-darwin-arm64-jit/` with its `pi` launcher and `pi-bin`); the
