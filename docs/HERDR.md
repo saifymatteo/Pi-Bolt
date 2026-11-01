@@ -19,9 +19,10 @@ The startup hint remains:
 The fork's **Pi native artifacts** Actions workflow targets Windows x64 and macOS
 Apple Silicon, including M2. Two ways to get a build from `saifymatteo/Pi-Bolt`:
 
-- **Prerelease (recommended):** pushing a `pi-native-v*` tag builds both platforms
-  and publishes a GitHub prerelease at that tag with the archives, a combined LF
-  `SHA256SUMS`, and per-platform build metadata.
+- **Release (recommended):** pushing a `pi-native-v*` tag builds both platforms and
+  publishes a GitHub release at that tag with the archives, a combined LF
+  `SHA256SUMS`, per-platform build metadata, and the installer scripts. Tags with a
+  `-trial` suffix publish as prereleases; plain tags are full releases marked Latest.
 - **CI artifact:** every push to `feat/pi-native-identity` uploads per-platform
   artifacts to the workflow run, kept for 14 days.
 

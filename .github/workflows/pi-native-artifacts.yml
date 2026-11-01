@@ -177,13 +177,13 @@ jobs:
           cat stage/win32-x64/SHA256SUMS stage/darwin-arm64/SHA256SUMS > out/release/SHA256SUMS
           cp stage/win32-x64/build-metadata.json out/release/build-metadata-win32-x64.json
           cp stage/darwin-arm64/build-metadata.json out/release/build-metadata-darwin-arm64.json
-      - name: Publish the prerelease at this tag
+      - name: Publish the release at this tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="out/release-notes.md"
           {
-            echo "Trial build of Pi-Bolt as a compiled Pi replacement ($GITHUB_REF_NAME)."
+            echo "Pi-Bolt ($GITHUB_REF_NAME): the compiled Pi replacement."
             echo ""
             echo "- Commit: $GITHUB_SHA"
             echo "- Signed upstream engine: $PI_NATIVE_RUNTIME_TAG"
@@ -202,6 +202,8 @@ jobs:
             echo "- Unnotarized: macOS Gatekeeper may need System Settings > Privacy & Security > Open Anyway."
             echo "- Herdr session restore may relaunch Node Pi instead of this build."
           } > "$notes"
-          gh release create "$GITHUB_REF_NAME" out/release/* --repo "$GITHUB_REPOSITORY" \
-            --prerelease --title "Pi-Bolt native $GITHUB_REF_NAME" --notes-file "$notes"
+          # Trial tags stay prereleases; plain pi-native-v* tags are full releases marked Latest.
+          flags=(--title "Pi-Bolt native $GITHUB_REF_NAME" --notes-file "$notes")
+          case "$GITHUB_REF_NAME" in *-trial*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" out/release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
 

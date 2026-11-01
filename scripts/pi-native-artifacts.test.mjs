@@ -100,7 +100,9 @@ test("a pi-native-v* tag publishes both archives as a verified prerelease", () =
 		assert.match(runs, new RegExp(`sha256sum -c SHA256SUMS`));
 		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
 	}
-	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\*.*--prerelease/s);
+	// Trial tags stay prereleases; plain pi-native-v* tags publish as full releases marked Latest.
+	assert.match(runs, /case "\$GITHUB_REF_NAME" in \*-trial\*\) flags\+=\(--prerelease\) ;; esac/);
+	assert.match(runs, /gh release create "\$GITHUB_REF_NAME" out\/release\/\* --repo "\$GITHUB_REPOSITORY" "\$\{flags\[@\]\}"/);
 	assert.match(runs, /cp scripts\/install\/install\.ps1 scripts\/install\/install\.sh out\/release\//);
 	assert.doesNotMatch(runs, /npm publish|homebrew|crates|cargo publish/);
 });
