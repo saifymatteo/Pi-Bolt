@@ -1,6 +1,7 @@
 /**
  * Herdr support for Pi-Bolt's native Pi identity. Register canonical Pi session metadata and report idle,
  * working and blocked states. Trial builds retain Herdr's default `pi --session` plan; compiled restart is deferred.
+ * Kept in the native heap independent of build-time environment; activates only when launched inside a Herdr pane.
  * Pi-Bolt skips Herdr's installed Pi integration file to avoid duplicate reporters (integration-file.ts).
  * Reports use Herdr's socket, or its executable on Windows (transport.ts). Disable with `-builtin:herdr`.
  * Only TUI sessions report: headless runs and subagents must not take over their parent's pane.
@@ -34,12 +35,9 @@ async function send(transport: HerdrTransport, request: () => HerdrRequest | und
 	return false;
 }
 
-export function createHerdrExtension(
-	env: NodeJS.ProcessEnv = process.env,
-	platform: NodeJS.Platform = process.platform,
-): ExtensionFactory {
+export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform): ExtensionFactory {
 	return (pi) => {
-		const herdr = herdrFromEnvironment(env, platform);
+		const herdr = herdrFromEnvironment(env ?? process.env, platform ?? process.platform);
 		if (!herdr) return;
 		const { transport, paneId } = herdr;
 		const source = "herdr:pi";

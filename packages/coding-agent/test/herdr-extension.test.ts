@@ -146,6 +146,48 @@ describe("Herdr extension", () => {
 		expect(fake.handlers.size).toBe(0);
 	});
 
+	test("reads the launch environment when a factory prepared outside Herdr activates", async () => {
+		const herdr = await fakeHerdr();
+		const fake = fakePi();
+		const originalEnv = process.env;
+		try {
+			process.env = {};
+			const factory = createHerdrExtension();
+			process.env = {
+				HERDR_ENV: "1",
+				HERDR_PANE_ID: "w1:p2",
+				HERDR_SOCKET_PATH: herdr.socketPath,
+			};
+			factory(fake.pi);
+		} finally {
+			process.env = originalEnv;
+		}
+		expect(fake.handlers.has("session_start")).toBe(true);
+		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/work/s.jsonl" }));
+		await until(() => herdr.requests.length === 2);
+		await fake.fire("agent_start", {}, context({ idle: () => false, sessionFile: "/work/s.jsonl" }));
+		await until(() => herdr.requests.length === 3);
+		expect(herdr.requests.map((request) => [request.method, request.params.state])).toEqual([
+			["pane.report_agent_session", undefined],
+			["pane.report_agent", "idle"],
+			["pane.report_agent", "working"],
+		]);
+	});
+
+	test("does not retain a build-time Herdr pane when activated outside Herdr", () => {
+		const fake = fakePi();
+		const originalEnv = process.env;
+		try {
+			process.env = { HERDR_ENV: "1", HERDR_PANE_ID: "build-pane", HERDR_SOCKET_PATH: "/build/herdr.sock" };
+			const factory = createHerdrExtension();
+			process.env = {};
+			factory(fake.pi);
+		} finally {
+			process.env = originalEnv;
+		}
+		expect(fake.handlers.size).toBe(0);
+	});
+
 	test("reports session and state changes", async () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
@@ -838,7 +880,7 @@ describe("Herdr's own Pi integration file", () => {
 		expect(await loadedCommands("0.7.5 arm64 jit-off", [herdrFile, other], dir)).toEqual(["other"]);
 	});
 
-	test("only Pi-Bolt has the built-in Herdr extension, and only in a Herdr pane", async () => {
+	test("Pi-Bolt keeps Herdr in its snapshot even when prepared outside a Herdr pane", async () => {
 		const names = (list: { builtInExtensions: unknown[] }) =>
 			list.builtInExtensions.map((e) => (typeof e === "function" ? "" : (e as { name: string }).name));
 		vi.stubEnv("HERDR_ENV", "1");
@@ -852,7 +894,7 @@ describe("Herdr's own Pi integration file", () => {
 		vi.unstubAllEnvs();
 		vi.stubEnv("HERDR_ENV", undefined);
 		vi.resetModules();
-		expect(names(await import("../src/extensions/index.ts"))).not.toContain("herdr");
+		expect(names(await import("../src/extensions/index.ts"))).toContain("herdr");
 		vi.unstubAllEnvs();
 	});
 });

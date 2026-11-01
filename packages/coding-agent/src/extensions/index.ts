@@ -2,7 +2,6 @@ import type { InlineExtension } from "../core/extensions/types.ts";
 import { PIBOLT } from "../pi-bolt.ts";
 import codemodeExtension from "./codemode/index.ts";
 import herdrExtension from "./herdr/index.ts";
-import { herdrFromEnvironment } from "./herdr/transport.ts";
 import llamaExtension from "./llama/index.ts";
 import mcpExtension from "./mcp/index.ts";
 import toolSearchExtension from "./tool-search/index.ts";
@@ -16,7 +15,6 @@ export const builtInExtensions: InlineExtension[] = [
 	{ name: "tool-search", factory: toolSearchExtension, replaceable: true, builtin: true },
 	{ name: "mcp", factory: mcpExtension, replaceable: true, builtin: true },
 	{ name: "usage", factory: usageExtension, replaceable: true, builtin: true },
-	// Pi-Bolt only, in a Herdr pane: reports to Herdr in place of Herdr's own Pi integration (see herdr/index.ts). (Outside
-	// Herdr it is not set up at all, which is work at every start for nothing.)
-	...(PIBOLT && herdrFromEnvironment() ? [{ name: "herdr", factory: herdrExtension, builtin: true }] : []),
+	// Native heaps may be prepared outside Herdr. Keep the factory in the snapshot; it checks the launch environment.
+	...(PIBOLT ? [{ name: "herdr", factory: herdrExtension, builtin: true }] : []),
 ];
