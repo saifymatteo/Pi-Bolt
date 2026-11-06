@@ -83,7 +83,7 @@ describe("the release signature", () => {
 	});
 
 	it("checks with the key releases are signed with", () => {
-		const repositoryKey = readFileSync(join(__dirname, "..", "..", "..", "keys", "release.pub"), "utf8");
+		const repositoryKey = readFileSync(join(__dirname, "..", "..", "..", "keys", "pi-native-release.pub"), "utf8");
 		expect(PIBOLT_RELEASE_KEY.trim()).toBe(repositoryKey.trim());
 	});
 });
