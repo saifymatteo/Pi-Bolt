@@ -80,9 +80,11 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 			return { state: "idle" };
 		}
 
-		// One report in flight at a time; only the newest waiting one is sent. When the newest one does not get through,
-		// `last` is cleared, so the next publish sends that state again instead of taking it as already reported.
+		// One report in flight at a time; only the newest waiting one is sent. Retry a failed latest state even when
+		// no more lifecycle events arrive, or a lost completion leaves Herdr working indefinitely.
 		let inFlight = false;
+		let retryTimer: ReturnType<typeof setTimeout> | undefined;
+		let retryDelay = 1000;
 		let queued: { report: typeof last; request: () => HerdrRequest | undefined } | undefined;
 		async function drain() {
 			if (inFlight) return;
@@ -91,7 +93,17 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 				while (queued) {
 					const { report, request } = queued;
 					queued = undefined;
-					if (!(await send(transport, request)) && !queued && last === report) last = undefined;
+					if (await send(transport, request)) {
+						retryDelay = 1000;
+					} else if (reporting && !queued && last === report) {
+						last = undefined;
+						retryTimer = setTimeout(() => {
+							retryTimer = undefined;
+							publish();
+						}, retryDelay);
+						retryTimer.unref?.();
+						retryDelay = Math.min(retryDelay * 2, 30_000);
+					}
 				}
 			} finally {
 				inFlight = false;
@@ -110,6 +122,8 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 			) {
 				return;
 			}
+			clearTimeout(retryTimer);
+			retryTimer = undefined;
 			last = next;
 			const params = {
 				pane_id: paneId,
@@ -121,9 +135,11 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 			};
 			queued = {
 				report: next,
-				// No try after session_shutdown: its seq would be above pane.release_agent's and take the pane back.
+				// Never retry a superseded report or take the pane back after session_shutdown.
 				request: () =>
-					reporting ? { method: "pane.report_agent", params: { ...params, seq: nextSeq() } } : undefined,
+					reporting && last === next
+						? { method: "pane.report_agent", params: { ...params, seq: nextSeq() } }
+						: undefined,
 			};
 			void drain();
 		}
@@ -211,9 +227,12 @@ export function createHerdrExtension(env?: NodeJS.ProcessEnv, platform?: NodeJS.
 		pi.on("session_shutdown", async (event) => {
 			if (!reporting) return;
 			reporting = false;
+			clearTimeout(retryTimer);
+			retryTimer = undefined;
+			queued = undefined;
+			last = undefined;
 			// Another session in this process (new, resume, fork) or a reload reports again from its session_start.
 			if (event.reason !== "quit") return;
-			queued = undefined;
 			// One short try: Herdr also notices the exit once the pane is back at its shell prompt.
 			await transport(
 				{

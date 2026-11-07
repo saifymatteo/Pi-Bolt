@@ -503,7 +503,7 @@ describe("Herdr extension", () => {
 				refuse ? { error: { code: "resume_not_accepted", message: "report rejected" } } : { result: {} },
 		});
 		await until(() => run.states().length === 2);
-		// Each try has its own seq, and nothing is retried until something publishes again.
+		// The two immediate tries have distinct seqs; a publish need not wait for the scheduled retry.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(run.states()).toEqual(["idle", "idle"]);
 		const [first, second] = run.stateRequests().map((r) => r.params.seq as number);
@@ -602,6 +602,120 @@ describe("Herdr extension", () => {
 		const outside: NodeJS.ProcessEnv = {};
 		quietOtherHerdrReporters(outside);
 		expect(outside.PI_HERDR_NO_SELF_REPORT).toBeUndefined();
+	});
+});
+
+describe("Herdr report recovery", () => {
+	async function reporter(answer: (args: readonly string[]) => boolean) {
+		vi.useFakeTimers();
+		cleanups.push(() => {
+			vi.clearAllTimers();
+			vi.useRealTimers();
+		});
+		const calls: string[][] = [];
+		vi.spyOn(childProcess, "spawn").mockImplementation((_bin, args) => {
+			const argv = [...(args ?? [])];
+			calls.push(argv);
+			const child = new childProcess.ChildProcess();
+			queueMicrotask(() => child.emit("exit", answer(argv) ? 0 : 1));
+			return child;
+		});
+		const fake = fakePi();
+		createHerdrExtension({ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_BIN_PATH: "herdr" }, "win32")(fake.pi);
+		cleanups.push(() => fake.fire("session_shutdown", { reason: "quit" }));
+		const ctx = context({ sessionFile: "/work/s.jsonl" });
+		await fake.fire("session_start", { reason: "startup" }, ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		const stateCalls = () => calls.filter((args) => args[1] === "report-agent");
+		return {
+			...fake,
+			ctx,
+			calls,
+			stateCalls,
+			states: () => stateCalls().map((args) => args[args.indexOf("--state") + 1]),
+		};
+	}
+
+	test("a lost completion recovers without another lifecycle event and stops retrying after success", async () => {
+		let refuseIdle = false;
+		let deliveredState: string | undefined;
+		const run = await reporter((args) => {
+			if (args[1] !== "report-agent") return true;
+			const state = args[args.indexOf("--state") + 1];
+			if (refuseIdle && state === "idle") return false;
+			deliveredState = state;
+			return true;
+		});
+		await run.fire("agent_start", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		refuseIdle = true;
+		await run.fire("agent_settled", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(run.states()).toEqual(["idle", "working", "idle", "idle"]);
+		expect(deliveredState).toBe("working");
+
+		refuseIdle = false;
+		await vi.advanceTimersByTimeAsync(999);
+		expect(deliveredState).toBe("working");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(deliveredState).toBe("idle");
+		expect(run.states()).toEqual(["idle", "working", "idle", "idle", "idle"]);
+		const seqs = run.stateCalls().map((args) => Number(args[args.indexOf("--seq") + 1]));
+		expect(seqs.every((seq, index) => index === 0 || seq > seqs[index - 1])).toBe(true);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(run.states()).toHaveLength(5);
+	});
+
+	test("repeated failures back off to at most one pair of attempts every thirty seconds", async () => {
+		let refuse = false;
+		const run = await reporter(() => !refuse);
+		refuse = true;
+		await run.fire("agent_start", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		let attempts = run.stateCalls().length;
+		for (const delay of [1000, 2000, 4000, 8000, 16_000, 30_000, 30_000]) {
+			await vi.advanceTimersByTimeAsync(delay - 1);
+			expect(run.stateCalls()).toHaveLength(attempts);
+			await vi.advanceTimersByTimeAsync(1);
+			attempts += 2;
+			expect(run.stateCalls()).toHaveLength(attempts);
+		}
+		refuse = false;
+	});
+
+	test("a new state supersedes the pending retry immediately", async () => {
+		let refuseIdle = false;
+		const run = await reporter((args) => !(refuseIdle && args.includes("idle")));
+		await run.fire("agent_start", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		refuseIdle = true;
+		await run.fire("agent_settled", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		await run.fire("agent_start", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(run.states()).toEqual(["idle", "working", "idle", "idle", "working"]);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(run.states()).toHaveLength(5);
+	});
+
+	test.each(["quit", "new", "resume", "fork", "reload"])("%s cancels a pending retry", async (reason) => {
+		let refuse = false;
+		const run = await reporter(() => !refuse);
+		refuse = true;
+		await run.fire("agent_start", {}, run.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		refuse = false;
+		await run.fire("session_shutdown", { reason });
+		expect(vi.getTimerCount()).toBe(0);
+		const count = run.calls.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(run.calls).toHaveLength(count);
+		if (reason !== "quit") {
+			await run.fire("session_start", { reason }, context({ sessionFile: "/work/next.jsonl" }));
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(run.calls).toHaveLength(count + 2);
+			expect(run.stateCalls().at(-1)).toContain("/work/next.jsonl");
+		}
 	});
 });
 
