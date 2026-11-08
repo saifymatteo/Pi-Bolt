@@ -15,7 +15,7 @@ concurrency:
 
 env:
   # Application update URLs may use the fork; the signed engine is always upstream's.
-  PI_NATIVE_RUNTIME_TAG: bolt-v1.1.5
+  PI_NATIVE_RUNTIME_TAG: bolt-v1.1.6
   PI_TELEMETRY: "0"
   DO_NOT_TRACK: "1"
 
