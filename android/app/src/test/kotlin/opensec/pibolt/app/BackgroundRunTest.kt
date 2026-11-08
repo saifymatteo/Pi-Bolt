@@ -10,6 +10,9 @@ import opensec.pibolt.app.background.WakePolicy
 import opensec.pibolt.app.background.WakePolicy.Decision
 import opensec.pibolt.app.background.WakePolicy.Work
 import opensec.pibolt.app.session.RunningSummary
+import opensec.pibolt.app.session.KeepAlive
+import opensec.pibolt.app.engine.BackgroundJobs
+import opensec.pibolt.protocol.session.SessionState
 import opensec.pibolt.protocol.session.DialogKind
 import opensec.pibolt.protocol.session.DialogRequest
 import java.io.File
@@ -199,6 +202,7 @@ class BackgroundRunTest {
             Request.Confirm("local:/p/a", "d1", yes = true),
             Request.Confirm("local:/p/a", "d1", yes = false),
             Request.Reply("remote-host"),
+            Request.Reply("local:/p/a", sessionId = "s1"),
         )
         for (r in requests) {
             val (action, extras) = SessionActions.encode(r)
@@ -270,6 +274,55 @@ class BackgroundRunTest {
     }
 
     @Test
+    fun aTappedSuggestionOfALongOptionIsThatOption() {
+        // ask_user_question's options run long ("PostgreSQL: a relational database with..."): the inline reply offers them
+        // cut to 40 characters, and tapping one sent the cut text, which matched no option ("Not an option").
+        val k = "local:/p/a"
+        val pg = "PostgreSQL: a relational database with strong consistency"
+        val sqlite = "SQLite: a single file, no server to run on the phone"
+        val db = DialogRequest("d5", DialogKind.Select, "Which database?", options = listOf(pg, sqlite))
+        val typed = assertIs<SessionActions.Answering.Typed>(SessionActions.answering(db))
+        assertTrue(typed.choices.all { it.length <= SessionActions.CHOICE_CHARS })
+        for ((option, offered) in db.options.zip(typed.choices)) {
+            assertEquals(Route.Value(k, "d5", option), SessionActions.route(Request.Answer(k, "d5"), offered, listOf(live(listOf(db)))))
+        }
+        // Two options with the same first 40 characters: a cut one is ambiguous, so it is asked again.
+        val twins = DialogRequest("d6", DialogKind.Select, "Which?", options = listOf("x".repeat(40) + " one", "x".repeat(40) + " two"))
+        assertIs<Route.Again>(SessionActions.route(Request.Answer(k, "d6"), "x".repeat(40), listOf(live(listOf(twins)))))
+    }
+
+    @Test
+    fun aReplyReachesOnlyTheConversationItWasAbout() {
+        // A "Pi finished" notification stays while the user opens another chat (or session) in the same live engine;
+        // its Reply must not land in the conversation that is open now.
+        val k = "local:/chats"
+        val now = SessionActions.Live(k, local = true, running = false, dialogs = emptyList(), sessionId = "chat-b")
+        assertEquals(Route.Gone(k), SessionActions.route(Request.Reply(k, sessionId = "chat-a"), "and in French?", listOf(now)))
+        assertEquals(Route.Prompt(k, "and in French?", steer = false), SessionActions.route(Request.Reply(k, sessionId = "chat-b"), "and in French?", listOf(now)))
+        // Not known on either side (a notification from an older build, a session not yet reported): as before.
+        assertIs<Route.Prompt>(SessionActions.route(Request.Reply(k), "hi", listOf(now)))
+        assertIs<Route.Prompt>(SessionActions.route(Request.Reply(k, sessionId = "chat-a"), "hi", listOf(now.copy(sessionId = null))))
+    }
+
+    @Test
+    fun aReplyThatReachedNoSessionKeepsItsText() {
+        assertEquals("Not sent: now add the tests", SessionActions.closedText("  now add the tests "))
+        assertEquals("Open it to continue", SessionActions.closedText(null))
+        assertEquals("Open it to continue", SessionActions.closedText("   "))
+        assertEquals(200, SessionActions.closedText("x".repeat(500)).removePrefix("Not sent: ").length)
+    }
+
+    @Test
+    fun aChatsNotificationNamesNoProject() {
+        // The chats' directory is HOME/.pibolt/chats: a "needs an answer" re-posted from a notification named the project
+        // "chats", so its tap opened nothing, or a project called "chats".
+        val chats = File("/data/data/in.opensec.pibolt/files/home/.pibolt/chats")
+        assertNull(opensec.pibolt.app.session.Notifications.projectOf(chats, chat = true))
+        assertEquals("app", opensec.pibolt.app.session.Notifications.projectOf(File("/p/app"), chat = false))
+        assertNull(opensec.pibolt.app.session.Notifications.projectOf(null, chat = false))
+    }
+
+    @Test
     fun eachDialogKindGetsItsControls() {
         assertEquals(SessionActions.Answering.YesNo, SessionActions.answering(confirm))
         assertEquals(SessionActions.Answering.Options(listOf("Opus", "Sonnet", "Haiku")), SessionActions.answering(pick))
@@ -278,6 +331,57 @@ class BackgroundRunTest {
         assertEquals("feature/...", assertIs<SessionActions.Answering.Typed>(SessionActions.answering(input)).label)
         val long = pick.copy(options = listOf("Keep the current implementation", "Rewrite"))
         assertIs<SessionActions.Answering.Typed>(SessionActions.answering(long), "a long option does not fit a button")
+    }
+
+    // The foreground service that keeps the network with the app away (KeepAlive)
+
+    @Test
+    fun everyKindOfWorkStartsTheService() {
+        val idle = SessionState(hello = true)
+        assertFalse(KeepAlive.busy(idle))
+        // Only turns and dialogs started it: a manual compaction lost its model request once the user left (Android 15+
+        // cuts an app's network about 5 seconds after it leaves without a foreground service).
+        assertTrue(KeepAlive.starts(idle, idle.copy(isCompacting = true, compactionReason = "manual")), "a manual /compact")
+        assertTrue(KeepAlive.starts(idle, idle.copy(isRunning = true)), "a turn")
+        assertTrue(KeepAlive.starts(idle, idle.copy(dialogs = listOf(confirm))), "a dialog")
+        assertTrue(KeepAlive.starts(idle, idle.copy(statuses = mapOf(BackgroundJobs.STATUS_KEY to "1 job"))), "background jobs")
+        assertTrue(KeepAlive.starts(idle, idle.copy(statuses = mapOf(KeepAlive.SUBAGENTS_STATUS to "1 agent"))), "background agents")
+        // Already busy: no second start; a status that is not work starts nothing.
+        assertFalse(KeepAlive.starts(idle.copy(isRunning = true), idle.copy(isRunning = true, isCompacting = true)))
+        assertFalse(KeepAlive.starts(idle, idle.copy(statuses = mapOf("todo" to "2/5"))))
+    }
+
+    @Test
+    fun theServiceCountsWhatItsNotificationShowsAsBusy() {
+        // KeepAlive.busy starts the service and RunningSummary.busy keeps it: work one counts and the other not would
+        // start the service only for it to stop itself at once, or never start it for work it would keep.
+        val idle = SessionState(hello = true)
+        val states = listOf(
+            idle,
+            idle.copy(isRunning = true),
+            idle.copy(isCompacting = true),
+            idle.copy(dialogs = listOf(confirm)),
+            idle.copy(statuses = mapOf(BackgroundJobs.STATUS_KEY to "1 job")),
+            idle.copy(statuses = mapOf(KeepAlive.SUBAGENTS_STATUS to "1 agent")),
+        )
+        for (s in states) {
+            val entry = RunningSummary.Entry(
+                name = "p", local = true, running = s.isRunning, waiting = s.dialogs.isNotEmpty(), compacting = s.isCompacting, connected = true,
+                subagents = KeepAlive.subagents(s), jobs = BackgroundJobs.STATUS_KEY in s.statuses,
+            )
+            assertEquals(entry.busy, KeepAlive.busy(s), "$s")
+        }
+    }
+
+    @Test
+    fun aSentPromptHoldsTheServiceUntilItsTurnShows() {
+        // Pi answers `prompt` once it accepted it; the turn's agent_start may still be behind that answer.
+        assertTrue(KeepAlive.waitsForTurn("started", running = false))
+        assertFalse(KeepAlive.waitsForTurn("started", running = true))
+        // Queued behind a running turn, or handled by an extension command: no turn to wait for.
+        assertFalse(KeepAlive.waitsForTurn("queued", running = false))
+        assertFalse(KeepAlive.waitsForTurn("handled", running = false))
+        assertFalse(KeepAlive.waitsForTurn(null, running = false))
     }
 
     @Test
