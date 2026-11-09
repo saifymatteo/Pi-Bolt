@@ -61,7 +61,8 @@ jobs:
           $base = "https://github.com/opensec-git/Pi-Bolt/releases/download/$env:PI_NATIVE_RUNTIME_TAG"
           New-Item -ItemType Directory -Force .work\pi-native-runtime, .work\runtime | Out-Null
           foreach ($name in 'pi-bolt-runtime-win32-x64.zip', 'SHA256SUMS', 'SHA256SUMS.sig', 'RUNTIME_STAMP') {
-            & curl.exe -fsSL -o ".work\pi-native-runtime\$name" "$base/$name"
+            # Retry: the release CDN answers some requests with transient 504s.
+            & curl.exe -fsSL --retry 4 --retry-delay 5 --retry-all-errors -o ".work\pi-native-runtime\$name" "$base/$name"
             if ($LASTEXITCODE -ne 0) { throw "could not download $name" }
           }
           & 'C:\Program Files\Git\usr\bin\openssl.exe' pkeyutl -verify -pubin -inkey keys\release.pub -rawin -in .work\pi-native-runtime\SHA256SUMS -sigfile .work\pi-native-runtime\SHA256SUMS.sig

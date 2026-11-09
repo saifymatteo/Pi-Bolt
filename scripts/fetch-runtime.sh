@@ -16,6 +16,8 @@ while [ $# -gt 0 ]; do
 	shift
 done
 need curl
+# Transient release-CDN 504s killed three CI runs mid-download; retry bounded so a hiccup is survived and a missing file still fails after the retries.
+CURL_RETRY=(--retry 4 --retry-delay 5 --retry-all-errors)
 REPO="https://github.com/opensec-git/Pi-Bolt"
 if [ "$TAG" = latest ]; then BASE="$REPO/releases/latest/download"; else BASE="$REPO/releases/download/$TAG"; fi
 BASE="${PIBOLT_DOWNLOAD_BASE:-$BASE}"
@@ -42,9 +44,9 @@ process.exit(c.verify(null, f.readFileSync(file), f.readFileSync(key, "utf8"), f
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 log "downloading $BASE/$NAME"
-curl -fL --progress-bar -o "$TMP/$NAME" "$BASE/$NAME"
-curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS"
-curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" || die "no signature at $BASE/SHA256SUMS.sig: the runtime is not used"
+curl -fL --progress-bar "${CURL_RETRY[@]}" -o "$TMP/$NAME" "$BASE/$NAME"
+curl -fsSL "${CURL_RETRY[@]}" -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS"
+curl -fsSL "${CURL_RETRY[@]}" -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" || die "no signature at $BASE/SHA256SUMS.sig: the runtime is not used"
 verify_signature "$TMP/SHA256SUMS" "$TMP/SHA256SUMS.sig" "$PIBOLT_ROOT/keys/release.pub"
 check_sum "$TMP" "$NAME" || die "checksum mismatch for $NAME"
 tar -C "$TMP" -xzf "$TMP/$NAME"
@@ -54,7 +56,7 @@ install -m 755 "$TMP/pi-bolt-runtime-$PIBOLT_RELEASE_PLATFORM/bun" "$PIBOLT_WORK
 # runtime's archive has its own stamp (scripts/runtime-stamp.sh musl), checked with the archive.
 if [ -n "$PIBOLT_LIBC" ]; then
 	cp "$TMP/pi-bolt-runtime-$PIBOLT_RELEASE_PLATFORM/RUNTIME_STAMP" "$PIBOLT_WORK/runtime/RUNTIME_STAMP" 2>/dev/null || rm -f "$PIBOLT_WORK/runtime/RUNTIME_STAMP"
-elif curl -fsSL -o "$TMP/RUNTIME_STAMP" "$BASE/RUNTIME_STAMP" 2>/dev/null && check_sum "$TMP" RUNTIME_STAMP; then
+elif curl -fsSL "${CURL_RETRY[@]}" -o "$TMP/RUNTIME_STAMP" "$BASE/RUNTIME_STAMP" 2>/dev/null && check_sum "$TMP" RUNTIME_STAMP; then
 	cp "$TMP/RUNTIME_STAMP" "$PIBOLT_WORK/runtime/RUNTIME_STAMP"
 else
 	rm -f "$PIBOLT_WORK/runtime/RUNTIME_STAMP"
