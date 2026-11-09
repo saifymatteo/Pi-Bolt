@@ -52,11 +52,15 @@ sealed interface SessionTarget {
     /** A new session. */
     data object Fresh : SessionTarget
 
+    /** No session file at all (`--no-session`): the page engine, which serves package pages and Home tiles, no chat. */
+    data object NoSession : SessionTarget
+
     /** Pi CLI arguments that open this target when the engine starts (packages/coding-agent/src/cli/args.ts). */
     fun cliArgs(): List<String> = when (this) {
         Continue -> listOf("--continue")
         is Resume -> listOf("--session", sessionFile)
         Fresh -> emptyList()
+        NoSession -> listOf("--no-session")
     }
 }
 
@@ -246,6 +250,18 @@ class LocalBackend(
         return e.enqueue(outgoing)
     }
 
+    /**
+     * Sends [type] to the running engine for the app's own use, whether it is warm, parked or connected: the answer
+     * never reaches a consumer. Null when no engine runs, or it did not answer within [timeoutMs].
+     */
+    suspend fun query(type: String, timeoutMs: Long = REQUEST_TIMEOUT_MS, fields: JsonObjectBuilder.() -> Unit = {}): JsonObject? {
+        val e = engine?.takeIf { it.alive } ?: return null
+        return e.request(type, timeoutMs, fields)
+    }
+
+    /** Messages the engine has in its current session, from the last `get_state` (0 for a new, empty one). */
+    val messageCount: Int get() = engine?.messageCount ?: 0
+
     /** Take the engine back from its consumer (it stays running) so a later [connect] can hand it to another. */
     fun park() {
         val e = engine ?: return
@@ -285,6 +301,7 @@ class LocalBackend(
         }
         val e = Engine(process)
         e.cwd = cwd
+        e.ephemeral = t == SessionTarget.NoSession
         engine = e
         e.begin()
         val hello = withTimeoutOrNull(config.helloTimeoutMs) { e.buildHello() }
@@ -337,12 +354,13 @@ class LocalBackend(
             }
             is SessionTarget.Resume -> if (wanted.sessionFile != e.sessionFile) open(wanted.sessionFile)
             SessionTarget.Fresh -> fresh()
+            SessionTarget.NoSession -> Unit
         }
         val snapshot = hello ?: e.buildHello() ?: throw EngineStartException("The engine stopped")
         e.held = null
         lease++
         e.deliver(snapshot, dropUnread = true)
-        target = SessionTarget.Continue
+        if (wanted != SessionTarget.NoSession) target = SessionTarget.Continue
     }
 
     private fun onExit(e: Engine, code: Int) {
@@ -355,8 +373,9 @@ class LocalBackend(
             while (exitTimes.isNotEmpty() && now - exitTimes.first() > config.crashWindowMs) exitTimes.removeFirst()
             exitTimes.size
         }
-        // Respawn into the same session; a session that never reached disk had nothing to keep.
-        target = e.sessionFile?.takeIf { File(it).isFile }?.let { SessionTarget.Resume(it) } ?: SessionTarget.Fresh
+        // Respawn into the same session; a session that never reached disk had nothing to keep. A page engine stays
+        // without one.
+        target = if (e.ephemeral) SessionTarget.NoSession else e.sessionFile?.takeIf { File(it).isFile }?.let { SessionTarget.Resume(it) } ?: SessionTarget.Fresh
         _state.value = if (quick >= config.maxQuickExits) {
             ConnectionState.Disconnected(DisconnectReason.EngineFailed, "The engine keeps stopping (${describeExit(code)})")
         } else {
@@ -373,6 +392,10 @@ class LocalBackend(
         /** The directory Pi works in for the current session (a switch to another project's session changes it). */
         @Volatile
         var cwd: String = ""
+
+        /** Started with `--no-session` (the page engine): a respawn starts without one again. */
+        @Volatile
+        var ephemeral = false
 
         private val ids = AtomicLong()
         private val lock = Any()
@@ -484,7 +507,7 @@ class LocalBackend(
          * dialog held during a session switch, say): callers hold connectMutex, so an unanswered request must not
          * block every later connect.
          */
-        suspend fun request(type: String, fields: JsonObjectBuilder.() -> Unit = {}): JsonObject? {
+        suspend fun request(type: String, timeoutMs: Long = REQUEST_TIMEOUT_MS, fields: JsonObjectBuilder.() -> Unit = {}): JsonObject? {
             val id = "i${ids.incrementAndGet()}-$type"
             val waiter = CompletableDeferred<JsonObject?>()
             internal[id] = waiter
@@ -492,12 +515,12 @@ class LocalBackend(
                 internal.remove(id)
                 return null
             }
-            return withTimeoutOrNull(REQUEST_TIMEOUT_MS) { waiter.await() }.also { if (it == null) internal.remove(id) }
+            return withTimeoutOrNull(timeoutMs) { waiter.await() }.also { if (it == null) internal.remove(id) }
         }
 
         /** Run a session-switching command for the engine's own purposes (not a consumer's). */
         suspend fun switchTo(type: String, fields: JsonObjectBuilder.() -> Unit = {}) {
-            val response = request(type, fields) ?: throw EngineStartException("The engine stopped or did not answer")
+            val response = request(type, fields = fields) ?: throw EngineStartException("The engine stopped or did not answer")
             if (response.bool("success") != true) {
                 throw EngineStartException(response.str("error") ?: "The engine could not open that session")
             }

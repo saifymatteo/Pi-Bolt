@@ -44,7 +44,7 @@ test("only Windows x64 and native macOS ARM64 build, with the repository's pinne
 });
 
 test("upstream signed runtime is pinned and its original adjacent stamp gates every build", () => {
-	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.1.6");
+	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.1.7");
 	assert.match(scripts, /bash scripts\/fetch-runtime\.sh --version "\$PI_NATIVE_RUNTIME_TAG"/);
 	assert.match(scripts, /https:\/\/github\.com\/opensec-git\/Pi-Bolt\/releases\/download/);
 	assert.match(scripts, /pkeyutl -verify -pubin -inkey keys\\release\.pub/);
