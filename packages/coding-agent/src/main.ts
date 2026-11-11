@@ -772,16 +772,25 @@ export async function main(args: string[], options?: MainOptions) {
 
 	// The service runs headless as RPC does, whether or not it was started from a terminal.
 	let appMode: AppMode = serviceHost ? "rpc" : resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
-	// `pi-bolt --herdr-pi` reports as Herdr's official Pi integration, which needs the process to be named `pi`: an
-	// interactive run in a Herdr pane re-execs itself under that name here, before the TUI (and its session) starts.
-	if (PIBOLT && parsed.herdrPi) {
+	// Pi-Bolt's engine is Pi-named by construction (docs/HERDR.md), so stock Herdr sees its official Pi integration in
+	// every pane without a flag: interactive builds in a Herdr pane take that identity here, before the TUI (and its
+	// session) starts. `--herdr-pi` stays as the explicit alias, and is what carries the mode through a re-exec when
+	// the process was not started under the `pi` name; source runs, whose process is not Pi-named, fall back quietly.
+	if (PIBOLT && (parsed.herdrPi || appMode === "interactive")) {
 		const herdrPi = startHerdrPi(args, appMode === "interactive");
 		if (herdrPi === "not-pi-exe") {
-			console.error(
-				chalk.yellow("Warning: --herdr-pi needs a pi.exe process on Windows; reporting as pi-bolt instead"),
-			);
+			if (parsed.herdrPi)
+				console.error(
+					chalk.yellow("Warning: --herdr-pi needs a pi.exe process on Windows; reporting as pi-bolt instead"),
+				);
 		} else if (herdrPi === "re-exec-failed") {
-			console.error(chalk.yellow("Warning: could not start --herdr-pi; reporting as pi-bolt"));
+			console.error(
+				chalk.yellow(
+					parsed.herdrPi
+						? "Warning: could not start --herdr-pi; reporting as pi-bolt"
+						: "Warning: could not report as Herdr's Pi integration; reporting as pi-bolt instead",
+				),
+			);
 		}
 	}
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);

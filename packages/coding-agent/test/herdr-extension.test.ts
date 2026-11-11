@@ -145,15 +145,15 @@ describe("Herdr extension", () => {
 		run.setIdle(false);
 		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
 		await until(() => run.states().length === 2);
-		// A dialog in the middle of a run is the agent waiting for the user.
+		// UI prompts are not a blocked signal (pi-atelier hosts a persistent overlay for the whole session): waiting
+		// extensions say so on the herdr:blocked channel instead, so a prompt reports nothing.
 		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm" });
-		await until(() => run.states().length === 3);
 		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm" });
-		await until(() => run.states().length === 4);
+		await new Promise((resolve) => setTimeout(resolve, 50));
 		run.setIdle(true);
 		await run.fire("agent_settled", { type: "agent_settled", aborted: false }, run.ctx);
-		await until(() => run.states().length === 5);
-		expect(run.states()).toEqual(["idle", "working", "blocked", "working", "idle"]);
+		await until(() => run.states().length === 3);
+		expect(run.states()).toEqual(["idle", "working", "idle"]);
 
 		const seqs = run.herdr.requests.map((r) => r.params.seq as number);
 		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
@@ -240,22 +240,23 @@ describe("Herdr extension", () => {
 	test("--herdr-pi reports as the official Pi integration and keeps the Pi-Bolt name", async () => {
 		const run = await startedInHerdr({ piIntegration: true });
 		await until(() => run.herdr.requests.length === 3);
+		// The pi identity restores through Herdr's own canonical `pi --session` plan, so no resume command is reported.
 		expect(run.herdr.requests[0].params).toMatchObject({
 			pane_id: "w1:p2",
 			source: "herdr:pi",
 			agent: "pi",
 			agent_session_path: "/work/s.jsonl",
 			session_start_source: "startup",
-			resume_argv: [COMMAND_NAME, "--herdr-pi", "--session", "/work/s.jsonl"],
 		});
+		expect(run.herdr.requests[0].params.resume_argv).toBeUndefined();
 		expect(run.herdr.requests[1].params).toMatchObject({
 			pane_id: "w1:p2",
 			source: "herdr:pi",
 			agent: "pi",
 			state: "idle",
 			agent_session_path: "/work/s.jsonl",
-			resume_argv: [COMMAND_NAME, "--herdr-pi", "--session", "/work/s.jsonl"],
 		});
+		expect(run.herdr.requests[1].params.resume_argv).toBeUndefined();
 		expect(run.herdr.requests[2]).toMatchObject({
 			method: "pane.report_metadata",
 			params: {
@@ -343,13 +344,13 @@ describe("Herdr extension", () => {
 		expect(second).toBeGreaterThan(first);
 
 		refuse = false;
-		// A dialog at the prompt leaves the state as it was; the state Herdr refused is sent again.
-		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "select" });
+		// Waiting extensions publish through the herdr:blocked channel; the state Herdr refused is sent again then.
+		run.emit("herdr:blocked", { active: true, label: "Question for you" });
 		await until(() => run.states().length === 3);
 		// Once Herdr took it, the same state is not sent again.
-		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "select" });
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(run.states()).toEqual(["idle", "idle", "idle"]);
+		run.emit("herdr:blocked", { active: false });
+		await until(() => run.states().length === 4);
+		expect(run.states()).toEqual(["idle", "idle", "blocked", "idle"]);
 	});
 
 	// #200 (PR #214 review): a report refused after the release on quit was tried again with a seq above the release's,
@@ -386,12 +387,6 @@ describe("Herdr extension", () => {
 
 	test("resume commands Herdr would refuse are left out", () => {
 		expect(resumeArgv("/home/me/s.jsonl")).toEqual([COMMAND_NAME, "--session", "/home/me/s.jsonl"]);
-		expect(resumeArgv("/home/me/s.jsonl", true)).toEqual([
-			COMMAND_NAME,
-			"--herdr-pi",
-			"--session",
-			"/home/me/s.jsonl",
-		]);
 		expect(resumeArgv(undefined)).toBeUndefined();
 		expect(resumeArgv("relative.jsonl")).toBeUndefined();
 		expect(resumeArgv("/home/o'brien/s.jsonl")).toBeUndefined();

@@ -14,11 +14,15 @@
  * take over the pane of the session that started them.
  *
  * With `pi-bolt --herdr-pi`, Pi-Bolt reports as Herdr's official Pi integration (`source=herdr:pi`, `agent=pi`)
- * instead, so Herdr records `agent_session` for `herdr agent list`. Restoring is the same either way: Herdr runs the resume
- * command a report carries before its own plan, and the reported command still starts `pi-bolt`, with `--herdr-pi`. Herdr
- * only accepts that pair from a pane whose foreground process is named `pi` (its process table is fixed), so the flag
- * re-execs Pi-Bolt with `pi` as its command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt`
- * rather than `pi`.
+ * explicitly; the fork's own builds do that without the flag, because their engine process is Pi-named by
+ * construction (docs/HERDR.md), so stock Herdr sees its own integration in the pane. A source reports its session
+ * (`pane.report_agent_session`), which anchors Herdr's canonical Pi lifecycle. Restoring differs by identity: the
+ * `pi` identity needs no command — Herdr restores it with its own canonical `pi --session` plan, so no resume
+ * command is reported (a reliable `pi-bolt` restart stays deferred) — while the plain `pi-bolt` identity, which
+ * Herdr has no plan for, reports `pi-bolt --session` itself. Herdr only accepts the `herdr:pi`/`pi` pair from a
+ * pane whose foreground process is named `pi` (its process table is fixed), so the flag re-execs Pi-Bolt with `pi`
+ * as its command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt` rather than
+ * `pi`.
  */
 
 import { isAbsolute } from "node:path";
@@ -57,16 +61,14 @@ async function send(transport: HerdrTransport, request: () => HerdrRequest | und
 }
 
 /**
- * The command Herdr runs to reopen this session after a server restart: `pi-bolt --session <file>`, or with `--herdr-pi`
- * in front when reporting as Herdr's Pi integration, so the restored process reports the same way. Herdr refuses a report
- * whose command has an apostrophe or a control character in it or is over 8 KiB, so such a session gets no command (its
- * state still reaches Herdr).
+ * The command Herdr runs to reopen a session reported under the plain `pi-bolt` identity, which Herdr has no restore
+ * plan for: `pi-bolt --session <file>`. Herdr refuses a report whose command has an apostrophe or a control character
+ * in it or is over 8 KiB, so such a session gets no command (its state still reaches Herdr). The `pi` identity sends
+ * no command: Herdr restores it with its own canonical `pi --session` plan.
  */
-export function resumeArgv(sessionFile: string | undefined, piIntegration = false): string[] | undefined {
+export function resumeArgv(sessionFile: string | undefined): string[] | undefined {
 	if (!sessionFile || !isAbsolute(sessionFile)) return undefined;
-	const argv = piIntegration
-		? [COMMAND_NAME, "--herdr-pi", "--session", sessionFile]
-		: [COMMAND_NAME, "--session", sessionFile];
+	const argv = [COMMAND_NAME, "--session", sessionFile];
 	if (argv.some((arg) => arg.includes("'") || hasControlCharacter(arg))) return undefined;
 	if (argv.reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 8192) return undefined;
 	return argv;
@@ -102,7 +104,6 @@ export function createHerdrExtension(
 		let sessionFile: string | undefined;
 		let sessionId: string | undefined;
 		let agentActive = false;
-		let uiPrompt = false;
 		const blockedLabels: string[] = [];
 		const runningSubagents = new Set<string>();
 		let backgroundBusy = false;
@@ -124,9 +125,10 @@ export function createHerdrExtension(
 		}
 
 		function desiredState(): { state: AgentState; message?: string } {
+			// UI prompts are not a blocked signal: pi-atelier hosts its sidebar as a persistent ui.custom overlay for the
+			// whole session, and stock Herdr's Pi integration never maps ui_prompt to blocked. Extensions that wait for the
+			// user say so on the herdr:blocked channel instead.
 			if (blockedLabels.length > 0) return { state: "blocked", message: blockedLabels[blockedLabels.length - 1] };
-			// A dialog during a run is a tool or extension waiting for the user; one opened at the prompt is the user's own.
-			if (uiPrompt && agentActive) return { state: "blocked" };
 			if (agentActive || backgroundBusy || runningSubagents.size > 0) return { state: "working" };
 			return { state: "idle" };
 		}
@@ -150,7 +152,8 @@ export function createHerdrExtension(
 					? { agent_session_id: sessionId }
 					: undefined;
 			if (!sessionRef) return undefined;
-			const argv = resumeArgv(sessionFile, piIntegration);
+			// The `pi` identity restores through Herdr's canonical plan, so it reports no resume command.
+			const argv = piIntegration ? undefined : resumeArgv(sessionFile);
 			return {
 				method: "pane.report_agent_session",
 				params: {
@@ -250,7 +253,8 @@ export function createHerdrExtension(
 			}
 			last = next;
 			if (piIntegration && (force || sessionChanged || !sessionReported)) queueSession(sessionStartSource);
-			const argv = resumeArgv(sessionFile, piIntegration);
+			// The `pi` identity restores through Herdr's canonical plan, so it reports no resume command.
+			const argv = piIntegration ? undefined : resumeArgv(sessionFile);
 			const params = {
 				pane_id: paneId,
 				source,
@@ -289,16 +293,6 @@ export function createHerdrExtension(
 		pi.on("agent_settled", (_event, ctx) => {
 			if (!reporting || !ctx.isIdle()) return;
 			agentActive = false;
-			publish();
-		});
-
-		pi.on("ui_prompt_start", () => {
-			uiPrompt = true;
-			publish();
-		});
-
-		pi.on("ui_prompt_end", () => {
-			uiPrompt = false;
 			publish();
 		});
 
