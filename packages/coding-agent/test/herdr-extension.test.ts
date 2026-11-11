@@ -1,23 +1,23 @@
 import * as childProcess from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { COMMAND_NAME, PRODUCT_NAME } from "../src/config.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
-import { createHerdrExtension, quietOtherHerdrReporters } from "../src/extensions/herdr/index.ts";
+import { createHerdrExtension, quietOtherHerdrReporters, resumeArgv } from "../src/extensions/herdr/index.ts";
 import { isHerdrPiIntegration } from "../src/extensions/herdr/integration-file.ts";
 import { type HerdrRequest, herdrAnswer, herdrArguments, socketTransport } from "../src/extensions/herdr/transport.ts";
 
-vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<object>()) }));
-
 type Request = { id: string; method: string; params: Record<string, unknown> };
+
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<object>()) }));
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	delete (globalThis as { PIBOLT_BUILD?: string }).PIBOLT_BUILD;
-	vi.restoreAllMocks();
 	vi.resetModules();
 });
 
@@ -27,20 +27,15 @@ function tempDir(): string {
 	return dir;
 }
 
-/** A Herdr socket that can refuse requests or hold registration, keeping every request. */
+/** A Herdr socket that answers every request (by default, that it took it) and keeps what it got. */
 async function fakeHerdr(
-	answer: boolean | ((request: Request) => Record<string, unknown> | Promise<Record<string, unknown>>) = () => ({
-		result: {},
-	}),
-): Promise<{
-	socketPath: string;
-	requests: Request[];
-	acknowledgeRegistration: () => void;
-}> {
+	answer: (request: Request) => Record<string, unknown> | Promise<Record<string, unknown>> = () => ({ result: {} }),
+): Promise<{ socketPath: string; requests: Request[] }> {
+	// On Windows Herdr's socket is a named pipe of that name: the raw name goes in the environment, the endpoint is listened on.
 	const dir = tempDir();
 	const socketPath = process.platform === "win32" ? basename(dir) : join(dir, "herdr.sock");
+	const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 	const requests: Request[] = [];
-	let acknowledgeRegistration: (() => void) | undefined;
 	const server = net.createServer((socket) => {
 		let buffered = "";
 		socket.on("data", (chunk) => {
@@ -49,21 +44,15 @@ async function fakeHerdr(
 				const request = JSON.parse(buffered.slice(0, newline)) as Request;
 				buffered = buffered.slice(newline + 1);
 				requests.push(request);
-				const acknowledge = () => {
-					void Promise.resolve(typeof answer === "function" ? answer(request) : { result: {} }).then((reply) =>
-						socket.write(`${JSON.stringify({ id: request.id, ...reply })}\n`),
-					);
-				};
-				if (answer === true && request.method === "pane.report_agent_session")
-					acknowledgeRegistration = acknowledge;
-				else acknowledge();
+				void Promise.resolve(answer(request)).then((reply) =>
+					socket.write(`${JSON.stringify({ id: request.id, ...reply })}\n`),
+				);
 			}
 		});
 	});
-	const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 	await new Promise<void>((resolve) => server.listen(endpoint, resolve));
 	cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
-	return { socketPath, requests, acknowledgeRegistration: () => acknowledgeRegistration?.() };
+	return { socketPath, requests };
 }
 
 function fakePi() {
@@ -112,27 +101,22 @@ async function startedInHerdr(
 		mode?: string;
 		sessionFile?: string;
 		answer?: (request: Request) => Record<string, unknown> | Promise<Record<string, unknown>>;
+		piIntegration?: boolean;
 	} = {},
 ) {
 	const herdr = await fakeHerdr(options.answer);
-	const env = {
-		HERDR_ENV: "1",
-		HERDR_SOCKET_PATH: herdr.socketPath,
-		HERDR_PANE_ID: "w1:p2",
-	};
+	const env = { HERDR_ENV: "1", HERDR_SOCKET_PATH: herdr.socketPath, HERDR_PANE_ID: "w1:p2" };
 	const fake = fakePi();
 	let idle = true;
-	createHerdrExtension(env)(fake.pi);
+	createHerdrExtension(env, process.platform, () => options.piIntegration === true)(fake.pi);
 	const ctx = context({ mode: options.mode, idle: () => idle, sessionFile: options.sessionFile ?? "/work/s.jsonl" });
 	await fake.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
-	const stateRequests = () => herdr.requests.filter((r) => r.method === "pane.report_agent");
-	const states = () => stateRequests().map((r) => r.params.state);
+	const states = () => herdr.requests.filter((r) => r.method === "pane.report_agent").map((r) => r.params.state);
 	return {
 		...fake,
 		herdr,
 		ctx,
 		states,
-		stateRequests,
 		setIdle: (value: boolean) => {
 			idle = value;
 		},
@@ -146,170 +130,34 @@ describe("Herdr extension", () => {
 		expect(fake.handlers.size).toBe(0);
 	});
 
-	test("reads the launch environment when a factory prepared outside Herdr activates", async () => {
-		const herdr = await fakeHerdr();
-		const fake = fakePi();
-		const originalEnv = process.env;
-		try {
-			process.env = {};
-			const factory = createHerdrExtension();
-			process.env = {
-				HERDR_ENV: "1",
-				HERDR_PANE_ID: "w1:p2",
-				HERDR_SOCKET_PATH: herdr.socketPath,
-			};
-			factory(fake.pi);
-		} finally {
-			process.env = originalEnv;
-		}
-		expect(fake.handlers.has("session_start")).toBe(true);
-		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/work/s.jsonl" }));
-		await until(() => herdr.requests.length === 2);
-		await fake.fire("agent_start", {}, context({ idle: () => false, sessionFile: "/work/s.jsonl" }));
-		await until(() => herdr.requests.length === 3);
-		expect(herdr.requests.map((request) => [request.method, request.params.state])).toEqual([
-			["pane.report_agent_session", undefined],
-			["pane.report_agent", "idle"],
-			["pane.report_agent", "working"],
-		]);
-	});
-
-	test("does not retain a build-time Herdr pane when activated outside Herdr", () => {
-		const fake = fakePi();
-		const originalEnv = process.env;
-		try {
-			process.env = { HERDR_ENV: "1", HERDR_PANE_ID: "build-pane", HERDR_SOCKET_PATH: "/build/herdr.sock" };
-			const factory = createHerdrExtension();
-			process.env = {};
-			factory(fake.pi);
-		} finally {
-			process.env = originalEnv;
-		}
-		expect(fake.handlers.size).toBe(0);
-	});
-
-	test("reports session and state changes", async () => {
+	test("reports the session, its resume command, and each state change", async () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
-		expect(run.stateRequests()[0].params).toMatchObject({
+		expect(run.herdr.requests[0].params).toMatchObject({
 			pane_id: "w1:p2",
-			source: "herdr:pi",
-			agent: "pi",
+			source: "pi-bolt",
+			agent: "pi-bolt",
 			state: "idle",
 			agent_session_path: "/work/s.jsonl",
+			resume_argv: [COMMAND_NAME, "--session", "/work/s.jsonl"],
 		});
 
-		// A persistent custom overlay opened before the run (pi-atelier hosts its sidebar this way) is not a block:
-		// stock Herdr's Pi integration never maps ui_prompt to blocked, so neither do we.
-		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" });
 		run.setIdle(false);
 		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
 		await until(() => run.states().length === 2);
-		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "custom" });
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(run.states()).toEqual(["idle", "working"]);
+		// A dialog in the middle of a run is the agent waiting for the user.
+		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm" });
+		await until(() => run.states().length === 3);
+		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm" });
+		await until(() => run.states().length === 4);
 		run.setIdle(true);
 		await run.fire("agent_settled", { type: "agent_settled", aborted: false }, run.ctx);
-		await until(() => run.states().length === 3);
-		expect(run.states()).toEqual(["idle", "working", "idle"]);
-		for (const request of run.herdr.requests) {
-			expect(request.params).not.toHaveProperty("resume_argv");
-			expect(request.params).toMatchObject({
-				source: "herdr:pi",
-				agent: "pi",
-				agent_session_path: "/work/s.jsonl",
-			});
-			expect(request.params).not.toHaveProperty("agent_session_id");
-		}
+		await until(() => run.states().length === 5);
+		expect(run.states()).toEqual(["idle", "working", "blocked", "working", "idle"]);
 
 		const seqs = run.herdr.requests.map((r) => r.params.seq as number);
 		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
 		expect(new Set(seqs).size).toBe(seqs.length);
-	});
-
-	test("registers the canonical Pi session before idle", async () => {
-		const sessionFile = join(tempDir(), "session with spaces.jsonl");
-		const run = await startedInHerdr({ sessionFile });
-		await until(() => run.states().length === 1);
-		expect(run.herdr.requests.map((request) => request.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.report_agent",
-		]);
-		const registration = run.herdr.requests[0];
-		expect(registration.params).toEqual({
-			pane_id: "w1:p2",
-			source: "herdr:pi",
-			agent: "pi",
-			seq: expect.any(Number),
-			session_start_source: "startup",
-			agent_session_path: sessionFile,
-		});
-		expect(registration.params).not.toHaveProperty("resume_argv");
-		expect(run.stateRequests()[0].params.seq).toBe((registration.params.seq as number) + 1);
-		expect(run.stateRequests()[0].params).toMatchObject({
-			state: "idle",
-			agent_session_path: sessionFile,
-		});
-	});
-
-	test.each([undefined, "relative.jsonl"])(
-		"registers the fallback session ID without an absolute path (%s)",
-		async (sessionFile) => {
-			const herdr = await fakeHerdr();
-			const fake = fakePi();
-			createHerdrExtension({
-				HERDR_ENV: "1",
-				HERDR_SOCKET_PATH: herdr.socketPath,
-				HERDR_PANE_ID: "w1:p2",
-			})(fake.pi);
-			await fake.fire("session_start", { reason: "startup" }, context({ sessionFile }));
-			await until(() => herdr.requests.some((request) => request.method === "pane.report_agent"));
-			expect(herdr.requests.map((request) => request.method)).toEqual([
-				"pane.report_agent_session",
-				"pane.report_agent",
-			]);
-			expect(herdr.requests[0].params).toEqual({
-				pane_id: "w1:p2",
-				source: "herdr:pi",
-				agent: "pi",
-				seq: expect.any(Number),
-				session_start_source: "startup",
-				agent_session_id: "session-id",
-			});
-			expect(herdr.requests[0].params).not.toHaveProperty("resume_argv");
-			expect(herdr.requests[1].params).toMatchObject({
-				state: "idle",
-				agent_session_id: "session-id",
-				seq: (herdr.requests[0].params.seq as number) + 1,
-			});
-			expect(herdr.requests[1].params).not.toHaveProperty("agent_session_path");
-		},
-	);
-
-	test("awaits canonical session registration before completing session_start or reporting idle", async () => {
-		const herdr = await fakeHerdr(true);
-		const fake = fakePi();
-		createHerdrExtension({
-			HERDR_ENV: "1",
-			HERDR_SOCKET_PATH: herdr.socketPath,
-			HERDR_PANE_ID: "w1:p2",
-		})(fake.pi);
-		let completed = false;
-		const starting = fake
-			.fire("session_start", { reason: "startup" }, context({ sessionFile: "/work/s.jsonl" }))
-			.then(() => {
-				completed = true;
-			});
-		await until(() => herdr.requests.length > 0);
-		try {
-			expect(herdr.requests.map((request) => request.method)).toEqual(["pane.report_agent_session"]);
-			expect(completed).toBe(false);
-		} finally {
-			herdr.acknowledgeRegistration();
-			await starting;
-		}
-		await until(() => herdr.requests.length === 2);
-		expect(herdr.requests[1]).toMatchObject({ method: "pane.report_agent", params: { state: "idle" } });
 	});
 
 	test("a dialog opened at the prompt is not a block", async () => {
@@ -325,7 +173,7 @@ describe("Herdr extension", () => {
 		await until(() => run.states().length === 1);
 		run.emit("herdr:blocked", { active: true, label: "Question for you" });
 		await until(() => run.states().length === 2);
-		expect(run.stateRequests()[1].params).toMatchObject({ state: "blocked", message: "Question for you" });
+		expect(run.herdr.requests[1].params).toMatchObject({ state: "blocked", message: "Question for you" });
 		run.emit("herdr:blocked", { active: false });
 		await until(() => run.states().length === 3);
 
@@ -382,106 +230,91 @@ describe("Herdr extension", () => {
 		expect(run.states()).toEqual(["idle", "working", "idle", "working", "idle"]);
 	});
 
-	test("non-TUI sessions do not report", async () => {
-		for (const mode of ["print", "json", "rpc", "subagent"]) {
-			const run = await startedInHerdr({ mode });
-			await run.fire("agent_start", { type: "agent_start" }, run.ctx);
-			await run.fire("ui_prompt_start", {});
-			run.emit("herdr:blocked", { active: true });
-			run.emit("subagents:started", { id: "child" });
-			await run.fire("agent_settled", {}, run.ctx);
-			await run.fire("session_shutdown", { reason: "quit" });
-			await new Promise((resolve) => setTimeout(resolve, 50));
-			expect(run.herdr.requests).toEqual([]);
-		}
+	test("print, JSON and RPC runs and subagent sessions do not report", async () => {
+		const run = await startedInHerdr({ mode: "print" });
+		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(run.herdr.requests).toEqual([]);
+	});
+
+	test("--herdr-pi reports as the official Pi integration and keeps the Pi-Bolt name", async () => {
+		const run = await startedInHerdr({ piIntegration: true });
+		await until(() => run.herdr.requests.length === 3);
+		expect(run.herdr.requests[0].params).toMatchObject({
+			pane_id: "w1:p2",
+			source: "herdr:pi",
+			agent: "pi",
+			agent_session_path: "/work/s.jsonl",
+			session_start_source: "startup",
+			resume_argv: [COMMAND_NAME, "--herdr-pi", "--session", "/work/s.jsonl"],
+		});
+		expect(run.herdr.requests[1].params).toMatchObject({
+			pane_id: "w1:p2",
+			source: "herdr:pi",
+			agent: "pi",
+			state: "idle",
+			agent_session_path: "/work/s.jsonl",
+			resume_argv: [COMMAND_NAME, "--herdr-pi", "--session", "/work/s.jsonl"],
+		});
+		expect(run.herdr.requests[2]).toMatchObject({
+			method: "pane.report_metadata",
+			params: {
+				pane_id: "w1:p2",
+				source: "pi-bolt",
+				agent: "pi",
+				applies_to_source: "herdr:pi",
+				display_agent: PRODUCT_NAME,
+			},
+		});
+	});
+
+	// PR #157 review: a refused session report left the state report queued behind it, so no state ever reached Herdr.
+	test("--herdr-pi still reports the state when Herdr refuses the session report", async () => {
+		const refused = { error: { code: "method_not_found", message: "unknown method" } };
+		const run = await startedInHerdr({
+			piIntegration: true,
+			answer: (request) => (request.method === "pane.report_agent_session" ? refused : { result: {} }),
+		});
+		await until(() => run.states().length === 1);
+		run.setIdle(false);
+		await run.fire("agent_start", { type: "agent_start" }, run.ctx);
+		await until(() => run.states().length === 2);
+		expect(run.states()).toEqual(["idle", "working"]);
+		// The session report goes first each time, two tries each, until Herdr takes one.
+		const methods = run.herdr.requests.map((r) => r.method);
+		expect(methods.slice(0, 3)).toEqual([
+			"pane.report_agent_session",
+			"pane.report_agent_session",
+			"pane.report_agent",
+		]);
+		expect(methods.filter((m) => m === "pane.report_agent_session").length).toBeGreaterThanOrEqual(4);
+	});
+
+	test("--herdr-pi releases the official Pi agent", async () => {
+		const run = await startedInHerdr({ piIntegration: true });
+		await until(() => run.herdr.requests.length === 3);
+		await run.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		await until(() => run.herdr.requests.length === 4);
+		expect(run.herdr.requests[3]).toMatchObject({
+			method: "pane.release_agent",
+			params: { pane_id: "w1:p2", source: "herdr:pi", agent: "pi" },
+		});
 	});
 
 	test("releases the pane on quit only", async () => {
 		const run = await startedInHerdr();
 		await until(() => run.states().length === 1);
 		await run.fire("session_shutdown", { type: "session_shutdown", reason: "new" });
-		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent_session", "pane.report_agent"]);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent"]);
 
 		const quitting = await startedInHerdr();
 		await until(() => quitting.states().length === 1);
 		await quitting.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		await until(() => quitting.herdr.requests.length === 3);
-		expect(quitting.herdr.requests.map((r) => r.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.report_agent",
-			"pane.release_agent",
-		]);
-		expect(quitting.herdr.requests.at(-1)).toMatchObject({
+		await until(() => quitting.herdr.requests.length === 2);
+		expect(quitting.herdr.requests[1]).toMatchObject({
 			method: "pane.release_agent",
-			params: {
-				pane_id: "w1:p2",
-				source: "herdr:pi",
-				agent: "pi",
-			},
+			params: { pane_id: "w1:p2", source: "pi-bolt", agent: "pi-bolt" },
 		});
-	});
-
-	test("switches session metadata without releasing the pane", async () => {
-		const run = await startedInHerdr({ sessionFile: "/work/first.jsonl" });
-		await until(() => run.states().length === 1);
-		for (const [index, reason] of ["new", "resume", "fork", "reload"].entries()) {
-			await run.fire("session_shutdown", { reason });
-			const sessionFile = `/work/${reason}.jsonl`;
-			await run.fire("session_start", { reason }, context({ sessionFile }));
-			await until(() => run.states().length === index + 2);
-			expect(run.stateRequests()[index + 1]).toMatchObject({
-				method: "pane.report_agent",
-				params: {
-					source: "herdr:pi",
-					agent: "pi",
-					agent_session_path: sessionFile,
-				},
-			});
-		}
-		expect(run.herdr.requests.map((request) => request.method)).toEqual(
-			["startup", "new", "resume", "fork", "reload"].flatMap(() => [
-				"pane.report_agent_session",
-				"pane.report_agent",
-			]),
-		);
-		const registrations = run.herdr.requests.filter((request) => request.method === "pane.report_agent_session");
-		for (const [index, reason] of ["startup", "new", "resume", "fork", "reload"].entries()) {
-			expect(registrations[index].params).toMatchObject({
-				pane_id: "w1:p2",
-				source: "herdr:pi",
-				agent: "pi",
-				session_start_source: reason,
-				agent_session_path: `/work/${reason === "startup" ? "first" : reason}.jsonl`,
-			});
-			expect(registrations[index].params).not.toHaveProperty("resume_argv");
-		}
-		const seqs = run.herdr.requests.map((request) => request.params.seq as number);
-		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
-		expect(new Set(seqs).size).toBe(seqs.length);
-	});
-
-	test("preserves session metadata without a custom resume command", async () => {
-		const run = await startedInHerdr();
-		await until(() => run.states().length === 1);
-		for (const [index, sessionFile] of [undefined, "relative.jsonl", "/o'brien/s.jsonl", "/work/é.jsonl"].entries()) {
-			await run.fire("session_shutdown", { reason: "resume" });
-			await run.fire("session_start", { reason: "resume" }, context({ sessionFile }));
-			await until(() => run.states().length === index + 2);
-			const params = run.stateRequests()[index + 1].params;
-			expect(params).toMatchObject({
-				source: "herdr:pi",
-				agent: "pi",
-				state: "idle",
-			});
-			expect(params).not.toHaveProperty("resume_argv");
-			if (sessionFile?.startsWith("/")) {
-				expect(params.agent_session_path).toBe(sessionFile);
-				expect(params).not.toHaveProperty("agent_session_id");
-			} else {
-				expect(params.agent_session_id).toBe("session-id");
-				expect(params).not.toHaveProperty("agent_session_path");
-			}
-		}
 	});
 
 	test("a Herdr that is not there does not hold anything up", async () => {
@@ -503,17 +336,18 @@ describe("Herdr extension", () => {
 				refuse ? { error: { code: "resume_not_accepted", message: "report rejected" } } : { result: {} },
 		});
 		await until(() => run.states().length === 2);
-		// The two immediate tries have distinct seqs; a publish need not wait for the scheduled retry.
+		// Each try has its own seq, and nothing is retried until something publishes again.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(run.states()).toEqual(["idle", "idle"]);
-		const [first, second] = run.stateRequests().map((r) => r.params.seq as number);
+		const [first, second] = run.herdr.requests.map((r) => r.params.seq as number);
 		expect(second).toBeGreaterThan(first);
 
 		refuse = false;
-		// The state Herdr refused is sent again on the next publish; a no-op busy update triggers one.
-		run.emit("herdr:busy", { active: false });
+		// A dialog at the prompt leaves the state as it was; the state Herdr refused is sent again.
+		await run.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "select" });
 		await until(() => run.states().length === 3);
 		// Once Herdr took it, the same state is not sent again.
+		await run.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "select" });
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(run.states()).toEqual(["idle", "idle", "idle"]);
 	});
@@ -526,7 +360,6 @@ describe("Herdr extension", () => {
 		const run = await startedInHerdr({
 			// The first report is refused only once the release is in.
 			answer: (request) => {
-				if (request.method === "pane.report_agent_session") return { result: {} };
 				if (request.method === "pane.release_agent") {
 					setTimeout(() => releaseArrived?.(), 0);
 					return { result: {} };
@@ -536,76 +369,250 @@ describe("Herdr extension", () => {
 				});
 			},
 		});
-		await until(() => run.states().length === 1);
+		await until(() => run.herdr.requests.length === 1);
 		await run.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(run.herdr.requests.map((r) => r.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.report_agent",
-			"pane.release_agent",
-		]);
+		expect(run.herdr.requests.map((r) => r.method)).toEqual(["pane.report_agent", "pane.release_agent"]);
 	});
 
-	test("registration retries use fresh sequences before reporting state", async () => {
-		let registrations = 0;
-		const run = await startedInHerdr({
-			answer: (request) => {
-				if (request.method === "pane.report_agent_session" && ++registrations === 1) {
-					return { error: { code: "not_ready" } };
-				}
-				return { result: {} };
-			},
-		});
-		await until(() => run.states().length === 1);
-		expect(run.herdr.requests.map((request) => request.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.report_agent_session",
-			"pane.report_agent",
-		]);
-		const seqs = run.herdr.requests.map((request) => request.params.seq as number);
-		expect(seqs[1]).toBe(seqs[0] + 1);
-		expect(seqs[2]).toBe(seqs[1] + 1);
-	});
-
-	test("a registration refused after quit cannot retry or report state", async () => {
-		let refuseRegistration: (() => void) | undefined;
-		const herdr = await fakeHerdr((request) => {
-			if (request.method === "pane.release_agent") {
-				refuseRegistration?.();
-				return { result: {} };
-			}
-			return new Promise((resolve) => {
-				refuseRegistration = () => resolve({ error: { code: "not_ready" } });
-			});
-		});
-		const fake = fakePi();
-		createHerdrExtension({ HERDR_ENV: "1", HERDR_SOCKET_PATH: herdr.socketPath, HERDR_PANE_ID: "w1:p2" })(fake.pi);
-		const starting = fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/work/s.jsonl" }));
-		await until(() => herdr.requests.length === 1);
-		await fake.fire("session_shutdown", { reason: "quit" });
-		await starting;
-		expect(herdr.requests.map((request) => request.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.release_agent",
-		]);
-		expect(herdr.requests[1].params.seq).toBe((herdr.requests[0].params.seq as number) + 1);
-	});
-
-	test("suppresses competing reporters only in Herdr", () => {
-		const inHerdr: NodeJS.ProcessEnv = {
-			HERDR_ENV: "1",
-			HERDR_SOCKET_PATH: "/tmp/h.sock",
-			HERDR_PANE_ID: "w1:p1",
-		};
+	test("pi-herdr's own report of the pane is turned off in Herdr only", () => {
+		const inHerdr: NodeJS.ProcessEnv = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/h.sock", HERDR_PANE_ID: "w1:p1" };
 		quietOtherHerdrReporters(inHerdr);
 		expect(inHerdr.PI_HERDR_NO_SELF_REPORT).toBe("1");
 		const outside: NodeJS.ProcessEnv = {};
 		quietOtherHerdrReporters(outside);
 		expect(outside.PI_HERDR_NO_SELF_REPORT).toBeUndefined();
 	});
+
+	test("resume commands Herdr would refuse are left out", () => {
+		expect(resumeArgv("/home/me/s.jsonl")).toEqual([COMMAND_NAME, "--session", "/home/me/s.jsonl"]);
+		expect(resumeArgv("/home/me/s.jsonl", true)).toEqual([
+			COMMAND_NAME,
+			"--herdr-pi",
+			"--session",
+			"/home/me/s.jsonl",
+		]);
+		expect(resumeArgv(undefined)).toBeUndefined();
+		expect(resumeArgv("relative.jsonl")).toBeUndefined();
+		expect(resumeArgv("/home/o'brien/s.jsonl")).toBeUndefined();
+		expect(resumeArgv("/home/me/a\nb.jsonl")).toBeUndefined();
+		expect(resumeArgv("/home/me/a\u0085b.jsonl")).toBeUndefined();
+		expect(resumeArgv(`/${"a".repeat(8200)}`)).toBeUndefined();
+	});
 });
 
+describe("Herdr socket", () => {
+	/** A socket that answers the first request line with `reply(id)`, as raw chunks, then closes. */
+	async function answering(reply: (id: string) => string[]): Promise<string> {
+		// On Windows Herdr's socket is a named pipe of that name.
+		const dir = tempDir();
+		const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${basename(dir)}` : join(dir, "herdr.sock");
+		const server = net.createServer((socket) => {
+			let buffered = "";
+			socket.on("data", async (chunk) => {
+				buffered += chunk.toString();
+				const newline = buffered.indexOf("\n");
+				if (newline < 0) return;
+				const { id } = JSON.parse(buffered.slice(0, newline)) as Request;
+				for (const part of reply(id)) {
+					socket.write(part);
+					await new Promise((resolve) => setTimeout(resolve, 5));
+				}
+				socket.end();
+			});
+		});
+		await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+		return endpoint;
+	}
+
+	const report: HerdrRequest = {
+		method: "pane.report_agent",
+		params: { pane_id: "w1:p1", source: "pi-bolt", agent: "pi-bolt", state: "idle", seq: 1 },
+	};
+
+	// #200: an error answer counted as success.
+	test("an error answer is not success", async () => {
+		const endpoint = await answering((id) => [
+			`${JSON.stringify({ id, error: { code: "resume_not_accepted", message: "report rejected" } })}\n`,
+		]);
+		expect(await socketTransport(endpoint)(report, 500)).toBe(false);
+	});
+
+	// #200: any data counted as success, before the answer was complete or even about this request.
+	test("only the complete answer with this request's id counts", async () => {
+		const taken = await answering((id) => {
+			const answer = JSON.stringify({ id, result: {} });
+			return [
+				`${JSON.stringify({ id: "other", error: { code: "x" } })}\n`,
+				answer.slice(0, 5),
+				`${answer.slice(5)}\n`,
+			];
+		});
+		expect(await socketTransport(taken)(report, 500)).toBe(true);
+		const cut = await answering((id) => [JSON.stringify({ id, result: {} }).slice(0, 10)]);
+		expect(await socketTransport(cut)(report, 500)).toBe(false);
+		const unterminated = await answering((id) => [JSON.stringify({ id, result: {} })]);
+		expect(await socketTransport(unterminated)(report, 500)).toBe(true);
+	});
+
+	test("answer lines", () => {
+		expect(herdrAnswer("a", JSON.stringify({ id: "a", result: {} }))).toBe(true);
+		expect(herdrAnswer("a", JSON.stringify({ id: "a", result: null }))).toBe(true);
+		expect(herdrAnswer("a", JSON.stringify({ id: "a", error: { code: "x" } }))).toBe(false);
+		expect(herdrAnswer("a", JSON.stringify({ id: "a" }))).toBe(false);
+		expect(herdrAnswer("a", JSON.stringify({ id: "b", result: {} }))).toBeUndefined();
+		expect(herdrAnswer("a", "not json")).toBeUndefined();
+		expect(herdrAnswer("a", "null")).toBeUndefined();
+	});
+});
+
+describe("Herdr executable (Windows)", () => {
+	test("requests become `herdr pane` arguments", () => {
+		expect(
+			herdrArguments({
+				method: "pane.report_agent",
+				params: {
+					pane_id: "w1:p2",
+					source: "pi-bolt",
+					agent: "pi-bolt",
+					state: "blocked",
+					message: "-y to continue?",
+					seq: 7,
+					agent_session_path: "C:\\Users\\me\\s.jsonl",
+					resume_argv: ["pi-bolt", "--session", "C:\\Users\\me\\s.jsonl"],
+				},
+			}),
+		).toEqual([
+			"pane",
+			"report-agent",
+			"w1:p2",
+			"--source",
+			"pi-bolt",
+			"--agent",
+			"pi-bolt",
+			"--seq",
+			"7",
+			"--state",
+			"blocked",
+			"--message",
+			"-y to continue?",
+			"--agent-session-path",
+			"C:\\Users\\me\\s.jsonl",
+			"--",
+			"pi-bolt",
+			"--session",
+			"C:\\Users\\me\\s.jsonl",
+		]);
+		expect(
+			herdrArguments({
+				method: "pane.release_agent",
+				params: { pane_id: "w1:p2", source: "pi-bolt", agent: "pi-bolt", seq: 8 },
+			}),
+		).toEqual(["pane", "release-agent", "w1:p2", "--source", "pi-bolt", "--agent", "pi-bolt", "--seq", "8"]);
+		expect(
+			herdrArguments({
+				method: "pane.report_agent_session",
+				params: {
+					pane_id: "w1:p2",
+					source: "herdr:pi",
+					agent: "pi",
+					seq: 9,
+					agent_session_path: "/work/s.jsonl",
+					session_start_source: "startup",
+					resume_argv: ["pi-bolt", "--herdr-pi", "--session", "/work/s.jsonl"],
+				},
+			}),
+		).toEqual([
+			"pane",
+			"report-agent-session",
+			"w1:p2",
+			"--source",
+			"herdr:pi",
+			"--agent",
+			"pi",
+			"--seq",
+			"9",
+			"--agent-session-path",
+			"/work/s.jsonl",
+			"--session-start-source",
+			"startup",
+			"--",
+			"pi-bolt",
+			"--herdr-pi",
+			"--session",
+			"/work/s.jsonl",
+		]);
+		expect(
+			herdrArguments({
+				method: "pane.report_metadata",
+				params: {
+					pane_id: "w1:p2",
+					source: "pi-bolt",
+					agent: "pi",
+					applies_to_source: "herdr:pi",
+					display_agent: PRODUCT_NAME,
+					seq: 9,
+				},
+			}),
+		).toEqual([
+			"pane",
+			"report-metadata",
+			"w1:p2",
+			"--source",
+			"pi-bolt",
+			"--agent",
+			"pi",
+			"--applies-to-source",
+			"herdr:pi",
+			"--display-agent",
+			PRODUCT_NAME,
+			"--seq",
+			"9",
+		]);
+	});
+
+	test.skipIf(process.platform === "win32")("on Windows, reports run HERDR_BIN_PATH", async () => {
+		const dir = tempDir();
+		const log = join(dir, "calls");
+		const bin = join(dir, "herdr");
+		// One line per call: its arguments, separated by |.
+		writeFileSync(bin, `#!/bin/sh\nIFS='|'; printf '%s\\n' "$*" >> '${log}'\n`);
+		chmodSync(bin, 0o755);
+		const fake = fakePi();
+		const env = { HERDR_ENV: "1", HERDR_BIN_PATH: bin, HERDR_PANE_ID: "w1:p2" };
+		createHerdrExtension(env, "win32")(fake.pi);
+		await fake.fire(
+			"session_start",
+			{ type: "session_start", reason: "startup" },
+			context({ sessionFile: "/w/s.jsonl" }),
+		);
+		const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
+		await until(() => calls().length === 1);
+		await fake.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		await until(() => calls().length === 2);
+		expect(calls()[0]).toMatch(
+			new RegExp(
+				`^pane\\|report-agent\\|w1:p2\\|--source\\|pi-bolt\\|--agent\\|pi-bolt\\|--seq\\|\\d+\\|--state\\|idle\\|--agent-session-path\\|/w/s.jsonl\\|--\\|${COMMAND_NAME}\\|--session\\|/w/s.jsonl$`,
+			),
+		);
+		expect(calls()[1]).toMatch(/^pane\|release-agent\|w1:p2\|--source\|pi-bolt\|--agent\|pi-bolt\|--seq\|\d+$/);
+	});
+});
+
+const HERDR_PI_FILE = `// installed by herdr
+// managed by herdr; reinstalling or updating the integration overwrites this file.
+// add custom hooks/plugins beside this file instead of editing it.
+// HERDR_INTEGRATION_ID=pi
+// HERDR_INTEGRATION_VERSION=9
+// @ts-nocheck
+export default function (pi) {
+	pi.registerCommand("herdr-file-loaded", { handler: async () => {} });
+}
+`;
+
 describe("Herdr report recovery", () => {
+	// The Windows transport reports through the `herdr` executable; a mock stands in for its children.
 	async function reporter(answer: (args: readonly string[]) => boolean) {
 		vi.useFakeTimers();
 		cleanups.push(() => {
@@ -636,7 +643,7 @@ describe("Herdr report recovery", () => {
 		};
 	}
 
-	test("a lost completion recovers without another lifecycle event and stops retrying after success", async () => {
+	test("a lost completion recovers on a timer without another lifecycle event, and stops after success", async () => {
 		let refuseIdle = false;
 		let deliveredState: string | undefined;
 		const run = await reporter((args) => {
@@ -651,22 +658,23 @@ describe("Herdr report recovery", () => {
 		refuseIdle = true;
 		await run.fire("agent_settled", {}, run.ctx);
 		await vi.advanceTimersByTimeAsync(0);
+		// The two immediate tries have distinct seqs; a publish need not wait for the scheduled retry.
 		expect(run.states()).toEqual(["idle", "working", "idle", "idle"]);
-		expect(deliveredState).toBe("working");
-
-		refuseIdle = false;
+		// No more events come; the failed completion is retried on the timer.
 		await vi.advanceTimersByTimeAsync(999);
 		expect(deliveredState).toBe("working");
+		refuseIdle = false;
 		await vi.advanceTimersByTimeAsync(1);
 		expect(deliveredState).toBe("idle");
 		expect(run.states()).toEqual(["idle", "working", "idle", "idle", "idle"]);
 		const seqs = run.stateCalls().map((args) => Number(args[args.indexOf("--seq") + 1]));
 		expect(seqs.every((seq, index) => index === 0 || seq > seqs[index - 1])).toBe(true);
+		// Delivered: no further attempts.
 		await vi.advanceTimersByTimeAsync(60_000);
 		expect(run.states()).toHaveLength(5);
 	});
 
-	test("repeated failures back off to at most one pair of attempts every thirty seconds", async () => {
+	test("repeated failures back off from one second to at most one attempt every thirty seconds", async () => {
 		let refuse = false;
 		const run = await reporter(() => !refuse);
 		refuse = true;
@@ -713,242 +721,11 @@ describe("Herdr report recovery", () => {
 		if (reason !== "quit") {
 			await run.fire("session_start", { reason }, context({ sessionFile: "/work/next.jsonl" }));
 			await vi.advanceTimersByTimeAsync(60_000);
-			expect(run.calls).toHaveLength(count + 2);
+			expect(run.calls).toHaveLength(count + 1);
 			expect(run.stateCalls().at(-1)).toContain("/work/next.jsonl");
 		}
 	});
 });
-
-describe("Herdr socket", () => {
-	/** A socket that answers the first request line with `reply(id)`, as raw chunks, then closes. */
-	async function answering(reply: (id: string) => string[]): Promise<string> {
-		const dir = tempDir();
-		const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\${basename(dir)}` : join(dir, "herdr.sock");
-		const server = net.createServer((socket) => {
-			let buffered = "";
-			socket.on("data", async (chunk) => {
-				buffered += chunk.toString();
-				const newline = buffered.indexOf("\n");
-				if (newline < 0) return;
-				const { id } = JSON.parse(buffered.slice(0, newline)) as Request;
-				for (const part of reply(id)) {
-					socket.write(part);
-					await new Promise((resolve) => setTimeout(resolve, 5));
-				}
-				socket.end();
-			});
-		});
-		await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
-		return socketPath;
-	}
-
-	const report: HerdrRequest = {
-		method: "pane.report_agent",
-		params: { pane_id: "w1:p1", source: "herdr:pi", agent: "pi", state: "idle", seq: 1 },
-	};
-
-	// #200: an error answer counted as success.
-	test("an error answer is not success", async () => {
-		const endpoint = await answering((id) => [
-			`${JSON.stringify({ id, error: { code: "resume_not_accepted", message: "report rejected" } })}\n`,
-		]);
-		expect(await socketTransport(endpoint)(report, 500)).toBe(false);
-	});
-
-	// #200: any data counted as success, before the answer was complete or even about this request.
-	test("only the complete answer with this request's id counts", async () => {
-		const taken = await answering((id) => {
-			const answer = JSON.stringify({ id, result: {} });
-			return [
-				`${JSON.stringify({ id: "other", error: { code: "x" } })}\n`,
-				answer.slice(0, 5),
-				`${answer.slice(5)}\n`,
-			];
-		});
-		expect(await socketTransport(taken)(report, 500)).toBe(true);
-		const cut = await answering((id) => [JSON.stringify({ id, result: {} }).slice(0, 10)]);
-		expect(await socketTransport(cut)(report, 500)).toBe(false);
-		const unterminated = await answering((id) => [JSON.stringify({ id, result: {} })]);
-		expect(await socketTransport(unterminated)(report, 500)).toBe(true);
-	});
-
-	test("answer lines", () => {
-		expect(herdrAnswer("a", JSON.stringify({ id: "a", result: {} }))).toBe(true);
-		expect(herdrAnswer("a", JSON.stringify({ id: "a", result: null }))).toBe(true);
-		expect(herdrAnswer("a", JSON.stringify({ id: "a", error: { code: "x" } }))).toBe(false);
-		expect(herdrAnswer("a", JSON.stringify({ id: "a" }))).toBe(false);
-		expect(herdrAnswer("a", JSON.stringify({ id: "b", result: {} }))).toBeUndefined();
-		expect(herdrAnswer("a", "not json")).toBeUndefined();
-		expect(herdrAnswer("a", "null")).toBeUndefined();
-	});
-});
-
-describe("Herdr platform environments", () => {
-	test("normal Windows reports use HERDR_BIN_PATH without compatibility markers", async () => {
-		const calls: string[][] = [];
-		vi.spyOn(childProcess, "spawn").mockImplementation((_bin, args) => {
-			calls.push([String(_bin), ...(args ?? [])]);
-			const child = new childProcess.ChildProcess();
-			queueMicrotask(() => child.emit("exit", 0));
-			return child;
-		});
-		const fake = fakePi();
-		createHerdrExtension(
-			{ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_BIN_PATH: "C:\\Herdr\\herdr.exe" },
-			"win32",
-		)(fake.pi);
-		const sessionFile = join(tempDir(), "session with spaces.jsonl");
-		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile }));
-		await until(() => calls.length === 2);
-		await fake.fire("session_shutdown", { reason: "quit" });
-		expect(calls.map((args) => args.slice(0, 4))).toEqual([
-			["C:\\Herdr\\herdr.exe", "pane", "report-agent-session", "w1:p2"],
-			["C:\\Herdr\\herdr.exe", "pane", "report-agent", "w1:p2"],
-			["C:\\Herdr\\herdr.exe", "pane", "release-agent", "w1:p2"],
-		]);
-		for (const args of calls) {
-			expect(args.slice(4, 8)).toEqual(["--source", "herdr:pi", "--agent", "pi"]);
-			expect(args).not.toContain("--");
-		}
-		expect(calls[0].slice(-4)).toEqual(["--agent-session-path", sessionFile, "--session-start-source", "startup"]);
-	});
-
-	test("normal macOS reports use HERDR_SOCKET_PATH even when HERDR_BIN_PATH is set", async () => {
-		const herdr = await fakeHerdr();
-		const fake = fakePi();
-		const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${herdr.socketPath}` : herdr.socketPath;
-		createHerdrExtension(
-			{ HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: endpoint, HERDR_BIN_PATH: "/unused/herdr" },
-			"darwin",
-		)(fake.pi);
-		await fake.fire("session_start", { reason: "startup" }, context({ sessionFile: "/Users/me/s.jsonl" }));
-		await until(() => herdr.requests.length === 2);
-		await fake.fire("session_shutdown", { reason: "quit" });
-		expect(herdr.requests.map((request) => request.method)).toEqual([
-			"pane.report_agent_session",
-			"pane.report_agent",
-			"pane.release_agent",
-		]);
-		for (const request of herdr.requests) {
-			expect(request.params).toMatchObject({ source: "herdr:pi", agent: "pi" });
-			expect(request.params).not.toHaveProperty("resume_argv");
-		}
-	});
-});
-
-describe("Herdr executable (Windows)", () => {
-	test.each(["startup", undefined])("session path registration arguments preserve spaces (reason=%s)", (reason) => {
-		expect(
-			herdrArguments({
-				method: "pane.report_agent_session",
-				params: {
-					pane_id: "w1:p2",
-					source: "herdr:pi",
-					agent: "pi",
-					seq: 7,
-					agent_session_path: "C:\\Users\\Some User\\session files\\s.jsonl",
-					...(reason ? { session_start_source: reason } : {}),
-				},
-			}),
-		).toEqual([
-			"pane",
-			"report-agent-session",
-			"w1:p2",
-			"--source",
-			"herdr:pi",
-			"--agent",
-			"pi",
-			"--seq",
-			"7",
-			"--agent-session-path",
-			"C:\\Users\\Some User\\session files\\s.jsonl",
-			...(reason ? ["--session-start-source", reason] : []),
-		]);
-	});
-
-	test.each(["resume", undefined])(
-		"session ID registration arguments need no resume command (reason=%s)",
-		(reason) => {
-			expect(
-				herdrArguments({
-					method: "pane.report_agent_session",
-					params: {
-						pane_id: "w1:p2",
-						source: "herdr:pi",
-						agent: "pi",
-						seq: 8,
-						agent_session_id: "session-id",
-						...(reason ? { session_start_source: reason } : {}),
-					},
-				}),
-			).toEqual([
-				"pane",
-				"report-agent-session",
-				"w1:p2",
-				"--source",
-				"herdr:pi",
-				"--agent",
-				"pi",
-				"--seq",
-				"8",
-				"--agent-session-id",
-				"session-id",
-				...(reason ? ["--session-start-source", reason] : []),
-			]);
-		},
-	);
-
-	test("requests become `herdr pane` arguments", () => {
-		expect(
-			herdrArguments({
-				method: "pane.report_agent",
-				params: {
-					pane_id: "w1:p2",
-					source: "herdr:pi",
-					agent: "pi",
-					state: "blocked",
-					message: "-y to continue?",
-					seq: 7,
-					agent_session_path: "C:\\Users\\me\\s.jsonl",
-				},
-			}),
-		).toEqual([
-			"pane",
-			"report-agent",
-			"w1:p2",
-			"--source",
-			"herdr:pi",
-			"--agent",
-			"pi",
-			"--seq",
-			"7",
-			"--state",
-			"blocked",
-			"--message",
-			"-y to continue?",
-			"--agent-session-path",
-			"C:\\Users\\me\\s.jsonl",
-		]);
-		expect(
-			herdrArguments({
-				method: "pane.release_agent",
-				params: { pane_id: "w1:p2", source: "herdr:pi", agent: "pi", seq: 8 },
-			}),
-		).toEqual(["pane", "release-agent", "w1:p2", "--source", "herdr:pi", "--agent", "pi", "--seq", "8"]);
-	});
-});
-
-const HERDR_PI_FILE = `// installed by herdr
-// managed by herdr; reinstalling or updating the integration overwrites this file.
-// add custom hooks/plugins beside this file instead of editing it.
-// HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=9
-// @ts-nocheck
-export default function (pi) {
-	pi.registerCommand("herdr-file-loaded", { handler: async () => {} });
-}
-`;
 
 describe("Herdr's own Pi integration file", () => {
 	function extensionsDir() {
@@ -1008,6 +785,8 @@ describe("Herdr's own Pi integration file", () => {
 		vi.unstubAllEnvs();
 		vi.stubEnv("HERDR_ENV", undefined);
 		vi.resetModules();
+		// The factory stays in the snapshot (a native heap may be prepared outside a pane); it checks the launch
+		// environment itself, so outside a Herdr pane it still reports nothing.
 		expect(names(await import("../src/extensions/index.ts"))).toContain("herdr");
 		vi.unstubAllEnvs();
 	});

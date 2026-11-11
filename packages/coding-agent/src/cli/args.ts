@@ -4,7 +4,6 @@
 
 import { existsSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import chalk from "chalk";
 import {
 	COMMAND_NAME,
 	CONFIG_DIR_NAME,
@@ -16,6 +15,7 @@ import {
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import { getToolListError, type TuiMode } from "../core/settings-manager.ts";
 import { PIBOLT } from "../pi-bolt.ts";
+import { chalk } from "../utils/lazy-packages.ts";
 import { isLocalPath } from "../utils/paths.ts";
 
 export type Mode = "text" | "json" | "rpc" | "acp" | "mcp";
@@ -61,6 +61,8 @@ export interface Args {
 	tuiMode?: TuiMode;
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
+	/** Pi-Bolt, Herdr: report as Herdr's official Pi integration and re-exec under the name `pi` (herdr/pi-name.ts). */
+	herdrPi?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -266,6 +268,8 @@ export function parseArgs(args: string[]): Args {
 			result.projectTrustOverride = false;
 		} else if (arg === "--offline") {
 			result.offline = true;
+		} else if (arg === "--herdr-pi") {
+			result.herdrPi = true;
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
 		} else if (arg.startsWith("--")) {
@@ -315,9 +319,10 @@ ${chalk.bold("Commands:")}
   ${COMMAND_NAME} update [source|self|pi]   Update ${PRODUCT_NAME}, extensions, or model catalogs
   ${COMMAND_NAME} list                      List installed extensions from settings
   ${COMMAND_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
-  ${COMMAND_NAME} auth <command>            Print credentials or check provider readiness
+  ${COMMAND_NAME} auth <command>            Log in or out, print credentials, or check provider readiness
   ${COMMAND_NAME} mcp <command>             Manage MCP servers
   ${COMMAND_NAME} service <command>         Remote control for paired phones at login: install/uninstall/status/pair/logs
+  ${COMMAND_NAME} remote-control <command>  Turn remote control (the Pi-Bolt phone app) on or off: enable/disable/status
 ${PIBOLT ? `  ${COMMAND_NAME} doctor                    Print a report of this installation, to paste into an issue\n  ${COMMAND_NAME} compile [options]         Compile the installed extensions into ${PRODUCT_NAME}\n` : ""}  ${COMMAND_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth/mcp
 
 ${chalk.bold("Options:")}
@@ -366,7 +371,7 @@ ${chalk.bold("Options:")}
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
-  --                             End option parsing; treat remaining arguments as messages/files
+${PIBOLT ? "  --herdr-pi                     Herdr: report as its official Pi integration (restores with `pi-bolt --herdr-pi`)\n" : ""}  --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number
 

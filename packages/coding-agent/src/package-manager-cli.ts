@@ -6,12 +6,12 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	truncateSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { ModelsError } from "@earendil-works/pi-ai";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import chalk from "chalk";
 import lockfile from "proper-lockfile";
 import { parseArgs } from "./cli/args.ts";
 import { selectConfig } from "./cli/config-selector.ts";
@@ -36,7 +36,7 @@ import {
 } from "./config.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
-import { DefaultPackageManager } from "./core/package-manager.ts";
+import { DefaultPackageManager, isOfflineModeEnabled } from "./core/package-manager.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader, formatPackageInstallWarning, isBuiltinExtension } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
@@ -45,6 +45,7 @@ import {
 	isPiBoltChannel,
 	PIBOLT,
 	PIBOLT_INSTALL_COMMAND,
+	PIBOLT_NPM_UPDATE_COMMAND,
 	type PiBoltChannel,
 	piBoltChannel,
 	piBoltExecutableIn,
@@ -54,11 +55,22 @@ import {
 	piBoltUpdateEnvironment,
 	setPiBoltChannel,
 } from "./pi-bolt.ts";
-import { piBoltCompileWanted, runPiBoltCompile } from "./pi-bolt-compile.ts";
+import {
+	AUTO_UPDATE_ARGUMENT,
+	AUTO_UPDATE_LOCK_STALE_MS,
+	type AutoUpdateResult,
+	autoUpdatePaths,
+	readAutoUpdateRecord,
+	startedRecently,
+	writeAutoUpdateRecord,
+} from "./pi-bolt-auto-update.ts";
+import { buildHasCompiledExtensions, runPiBoltCompile } from "./pi-bolt-compile.ts";
 import { fetchReleaseInstaller, type ReleaseInstaller, runReleaseInstaller } from "./pi-bolt-installer.ts";
 import { rollbackPiBolt } from "./pi-bolt-rollback.ts";
 import { isInProfile, updatePiBoltWindows } from "./pi-bolt-update-windows.ts";
+import { stripAnsi } from "./utils/ansi.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/child-process.ts";
+import { chalk } from "./utils/lazy-packages.ts";
 import { canonicalizePath, getCwdRelativePath } from "./utils/paths.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import { stripBom } from "./utils/text.ts";
@@ -726,9 +738,21 @@ async function refreshModelCatalogs(agentDir: string): Promise<void> {
 		if (result.aborted) {
 			throw new Error("Model catalog refresh timed out.");
 		}
-		if (result.errors.size > 0) {
-			const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
-			throw new Error(`Could not refresh model catalogs: ${details}`);
+		const failures: string[] = [];
+		for (const [provider, error] of result.errors) {
+			// A stale login only affects that provider's catalog; the others are still worth refreshing.
+			if (error instanceof ModelsError && error.code === "oauth") {
+				console.warn(
+					chalk.yellow(
+						`Warning: skipped model catalog for ${provider}: ${error.message}\nLog in again with \`${COMMAND_NAME} auth login ${provider}\` to refresh it.`,
+					),
+				);
+			} else {
+				failures.push(`${provider}: ${error.message}`);
+			}
+		}
+		if (failures.length > 0) {
+			throw new Error(`Could not refresh model catalogs: ${failures.join("; ")}`);
 		}
 	} finally {
 		clearTimeout(timeout);
@@ -798,13 +822,14 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 	const fallback =
 		method === undefined
 			? ""
-			: ` You can update without it: ${method === "npm" ? "npm install -g pi-bolt@latest" : (piBoltPackageManager(method)?.update ?? PIBOLT_INSTALL_COMMAND)}`;
+			: ` You can update without it: ${method === "npm" ? PIBOLT_NPM_UPDATE_COMMAND : (piBoltPackageManager(method)?.update ?? PIBOLT_INSTALL_COMMAND)}`;
 	let latestRelease: Awaited<ReturnType<typeof getLatestPiRelease>>;
 	try {
 		latestRelease = await getLatestPiRelease(currentVersion, { retry: true });
 	} catch (error: unknown) {
 		throw new Error(
-			`Could not determine latest ${COMMAND_NAME} version: ${formatVersionCheckError(error)}.${fallback}`,
+			// (The reasons may end with a period already: "The operation timed out.")
+			`Could not determine latest ${COMMAND_NAME} version: ${formatVersionCheckError(error).replace(/\.+$/, "")}.${fallback}`,
 			{ cause: error },
 		);
 	}
@@ -837,16 +862,13 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
  * variant, same folder). One installed with the npm package, Homebrew, Scoop or mise is updated with the package manager
  * instead.
  */
-async function runPiBoltSelfUpdate(
-	version: string,
-	options: { reinstall?: boolean; recompile?: boolean } = {},
-): Promise<boolean> {
+async function runPiBoltSelfUpdate(version: string, options: { reinstall?: boolean } = {}): Promise<boolean> {
 	const method = piBoltInstallMethod();
 	if (method === "npm") {
 		console.log(
-			`This Pi-Bolt was installed with the npm package. Update it with the package manager that installed it:`,
+			`Pi-Bolt ${version} is out. This Pi-Bolt was installed with the npm package: update it with the package manager that installed it:`,
 		);
-		console.log(`  npm install -g pi-bolt@latest      (or: bun add -g pi-bolt@latest)`);
+		console.log(`  ${PIBOLT_NPM_UPDATE_COMMAND}      (or: bun add -g --trust pi-bolt@latest)`);
 		return false;
 	}
 	// (Homebrew, Scoop and mise own the folder: the installer would replace files they keep track of.)
@@ -905,31 +927,97 @@ async function runPiBoltSelfUpdate(
 				: `Updated Pi-Bolt from ${PIBOLT?.version} to ${version}`,
 		),
 	);
-	// Extensions `pi-bolt compile` compiled in before are compiled into this release too, by the release itself.
-	const installDir = piBoltUpdateEnvironment(version).PIBOLT_INSTALL;
-	if (options.recompile !== false && installDir && piBoltCompileWanted(installDir)) {
-		console.log(chalk.dim(`Compiling the extensions compiled in before into Pi-Bolt ${version}...`));
-		const compiled = spawnProcessSync(installed, ["compile", "--after-update"], {
-			cwd: homedir(),
-			encoding: "utf8",
-			stdio: "inherit",
-		});
-		if (compiled.status !== 0) {
-			console.error(
-				chalk.yellow(
-					`The extensions were not compiled into ${version}: they load from their files until \`pi-bolt compile\` compiles them in.`,
-				),
-			);
-		}
-	}
+	// (Extensions compiled into the build it replaced load from their files now: the installer said so, and how to compile
+	// them in again. An update compiles nothing.)
 	return true;
+}
+
+/**
+ * `pi-bolt update --background`, which a session starts (pi-bolt-auto-update.ts): with the lock, when no other runs, the
+ * update `pi-bolt update` makes, to the latest release of the installation's channel, its output going to the session's log
+ * file and how it ended to <install>/auto-update.json. Returns 0 when it ran (whatever it found), 1 when it could not.
+ */
+async function runPiBoltBackgroundUpdate(currentVersion: string): Promise<number> {
+	const installDir = piBoltInstallDir();
+	if (!installDir) return 1;
+	let release: () => Promise<void>;
+	try {
+		release = await lockfile.lock(autoUpdatePaths(installDir).lock, {
+			realpath: false,
+			stale: AUTO_UPDATE_LOCK_STALE_MS,
+			// (A lock it could not renew is taken over by the next update after AUTO_UPDATE_LOCK_STALE_MS: nothing to stop here.)
+			onCompromised: () => {},
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ELOCKED") {
+			console.log("Another Pi-Bolt is updating this installation.");
+			return 0;
+		}
+		throw error;
+	}
+	const checkedAt = Date.now();
+	// Another Pi-Bolt that started at the same moment may have run its update and let go of the lock before this one took it.
+	if (startedRecently(readAutoUpdateRecord(installDir), checkedAt)) {
+		await release();
+		console.log("Another Pi-Bolt updated this installation less than a day ago.");
+		return 0;
+	}
+	let result: AutoUpdateResult;
+	try {
+		// (The log is this update's from here; until now it was the last one's.)
+		truncateSync(autoUpdatePaths(installDir).log);
+	} catch {
+		// No log: run by hand, not by a session.
+	}
+	try {
+		writeAutoUpdateRecord(installDir, { checkedAt });
+		result = await backgroundUpdate(currentVersion, installDir);
+	} catch (error) {
+		result = { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+	}
+	try {
+		writeAutoUpdateRecord(installDir, { checkedAt, result });
+	} finally {
+		await release();
+	}
+	return 0;
+}
+
+/** The background update's lookup and update, and how it ended: what runPiBoltSelfUpdate prints, kept for its reason. */
+async function backgroundUpdate(currentVersion: string, installDir: string): Promise<AutoUpdateResult> {
+	const latest = await getLatestPiRelease(currentVersion, { retry: true });
+	if (!latest) return { kind: "failed", reason: "the latest release could not be found" };
+	if (!isNewerPackageVersion(latest.version, currentVersion)) return { kind: "current", version: currentVersion };
+	// (Extensions compiled into this build load from their files in the new one: an update compiles nothing.)
+	const compiledBefore =
+		buildHasCompiledExtensions(dirname(process.execPath)) && existsSync(join(installDir, "compile.json"));
+	const errors: string[] = [];
+	const error = console.error;
+	console.error = (...args: unknown[]) => {
+		errors.push(args.map(String).join(" "));
+		error(...args);
+	};
+	let installed: boolean;
+	try {
+		installed = await runPiBoltSelfUpdate(latest.version);
+	} finally {
+		console.error = error;
+	}
+	if (!installed) {
+		// (The first line runPiBoltSelfUpdate printed: "Error: <why>", without its colors.)
+		const reason = stripAnsi(errors[0] ?? "")
+			.replace(/^Error: /, "")
+			.replace(/\.$/, "");
+		return { kind: "failed", reason: reason || "the update did not finish", version: latest.version };
+	}
+	return { kind: "installed", version: latest.version, ...(compiledBefore ? { extensionsFromFiles: true } : {}) };
 }
 
 /** `pi-bolt update` on Windows for the installation in `installDir` (this executable's), without the installer. */
 async function runPiBoltWindowsUpdate(
 	version: string,
 	installDir: string,
-	options: { reinstall?: boolean; recompile?: boolean },
+	options: { reinstall?: boolean },
 ): Promise<boolean> {
 	console.log(chalk.dim(`Updating Pi-Bolt to ${version}...`));
 	try {
@@ -955,21 +1043,7 @@ async function runPiBoltWindowsUpdate(
 				: `Updated Pi-Bolt from ${PIBOLT?.version} to ${version}`,
 		),
 	);
-	if (options.recompile !== false && piBoltCompileWanted(installDir)) {
-		console.log(chalk.dim(`Compiling the extensions compiled in before into Pi-Bolt ${version}...`));
-		const compiled = spawnProcessSync(installed, ["compile", "--after-update"], {
-			cwd: homedir(),
-			encoding: "utf8",
-			stdio: "inherit",
-		});
-		if (compiled.status !== 0) {
-			console.error(
-				chalk.yellow(
-					`The extensions were not compiled into ${version}: they load from their files until \`pi-bolt compile\` compiles them in.`,
-				),
-			);
-		}
-	}
+	// (Nothing is compiled: Windows builds have no extensions compiled in.)
 	return true;
 }
 
@@ -1211,6 +1285,11 @@ export async function handlePackageCommand(
 	args: string[],
 	runtimeOptions: PackageCommandRuntimeOptions = {},
 ): Promise<boolean> {
+	// Pi-Bolt: the update a session started in the background (pi-bolt-auto-update.ts).
+	if (PIBOLT && args[0] === "update" && args[1] === AUTO_UPDATE_ARGUMENT && args.length === 2) {
+		process.exitCode = await runPiBoltBackgroundUpdate(PIBOLT.version);
+		return true;
+	}
 	// Pi-Bolt: `pi-bolt compile` (pi-bolt-compile.ts). In Pi, `compile` stays a message to the model.
 	if (PIBOLT && args[0] === "compile") {
 		const flagError = getPiBoltPackageFlagError(args);
@@ -1221,7 +1300,7 @@ export async function handlePackageCommand(
 		}
 		const build = PIBOLT;
 		process.exitCode = await runPiBoltCompile(args.slice(1), () =>
-			runPiBoltSelfUpdate(build.version, { reinstall: true, recompile: false }),
+			runPiBoltSelfUpdate(build.version, { reinstall: true }),
 		);
 		return true;
 	}
@@ -1315,10 +1394,17 @@ export async function handlePackageCommand(
 
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 
+	// Update result events describe a changed package, e.g. "npm:foo 1.2.0 -> 1.3.0".
+	const updatedPackages: string[] = [];
+	// Progress messages are warnings, e.g. npm reinstalled the old version from stale registry metadata.
+	let warningCount = 0;
 	packageManager.setProgressCallback((event) => {
-		if (event.type === "start") {
+		if (event.type === "result" && event.action === "update" && event.message) {
+			updatedPackages.push(event.message);
+		} else if (event.type === "start") {
 			process.stdout.write(chalk.dim(`${event.message}\n`));
 		} else if (event.type === "progress" && event.message) {
+			warningCount++;
 			process.stdout.write(chalk.yellow(`${event.message}\n`));
 		}
 	});
@@ -1395,10 +1481,29 @@ export async function handlePackageCommand(
 				if (updateTargetIncludesExtensions(target)) {
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
-					if (updateSource) {
-						console.log(chalk.green(`Updated ${updateSource}`));
+					// Only claim "up to date" when the update actually checked and nothing warned.
+					if (isOfflineModeEnabled()) {
+						console.log(chalk.yellow("Skipped package updates (offline mode)"));
+					} else if (updatedPackages.length === 0 && warningCount > 0) {
+						console.log(
+							chalk.yellow(
+								updateSource
+									? `${updateSource} was not updated, see the warnings above`
+									: "No packages were updated, see the warnings above",
+							),
+						);
+					} else if (updatedPackages.length === 0) {
+						console.log(
+							chalk.green(
+								updateSource ? `${updateSource} is already up to date` : "Packages are already up to date",
+							),
+						);
 					} else {
-						console.log(chalk.green("Updated packages"));
+						const count = updatedPackages.length;
+						console.log(chalk.green(`Updated ${count} package${count === 1 ? "" : "s"}:`));
+						for (const message of updatedPackages) {
+							console.log(`  ${message}`);
+						}
 					}
 				}
 				if (options.channel) {

@@ -144,6 +144,8 @@ main() {
 
 	EXISTING=""
 	if [ -x "$INSTALL/$NAME/pi" ]; then EXISTING="$INSTALL/$NAME"; fi
+	COMPILED_BEFORE=""
+	if [ -n "$EXISTING" ] && has_compiled_extensions "$EXISTING"; then COMPILED_BEFORE=1; fi
 	choose_action
 	case "$ACTION" in
 	none) exit 0 ;;
@@ -165,14 +167,13 @@ main() {
 	# Pi-Bolt keeps the packages only it runs (OpenSec's extensions) out of Pi's list, which it does as it starts: once now, so
 	# that Pi, if it is started before Pi-Bolt, does not find them (an earlier installer put them there).
 	(cd "$INSTALL" && "$INSTALL/$NAME/pi" list >/dev/null 2>&1) || true
+	# A remote control service that runs (an earlier version's) is restarted, so it runs this version; nothing when none runs.
+	(cd "$INSTALL" && "$INSTALL/$NAME/pi" service restart >/dev/null 2>&1) || true
 	if [ "$ACTION" = reinstall ] && [ -n "${installed:-}" ] && [ "${installed:-}" != "$SHOWN_VERSION" ]; then word=updated
 	elif [ "$ACTION" = reinstall ]; then word=reinstalled
 	else word=installed; fi
 	printf '\nPi-Bolt %s was %s successfully %s(Pi %s)%s.\n' "$SHOWN_VERSION" "$word" "$dim" "$("$INSTALL/$NAME/pi" --version)" "$reset"
-	# `pi-bolt compile` compiled extensions into a build here: this one, the release's, has none (they load from their files).
-	if [ -f "$INSTALL/compile.json" ]; then
-		printf 'Extensions were compiled into the build this replaced: run %spi-bolt compile%s to compile them into this one.\n' "$bold" "$reset"
-	fi
+	compiled_extensions_note "$COMPILED_BEFORE"
 	offer_extensions
 	if [ "$(command -v pi-bolt 2>/dev/null || true)" = "$BIN_DIR/pi-bolt" ]; then
 		printf '\nRun it with: %spi-bolt%s\n' "$bold" "$reset"
@@ -180,6 +181,20 @@ main() {
 		path_hint
 	fi
 	offer_start
+}
+
+# has_compiled_extensions DIR: whether the build in DIR has extensions `pi-bolt compile` compiled in (its pi-bolt.txt names them).
+has_compiled_extensions() {
+	grep -q '^Extensions compiled in' "$1/pi-bolt.txt" 2>/dev/null
+}
+
+# compiled_extensions_note COMPILED_BEFORE: after an install that replaced a build with extensions compiled in (COMPILED_BEFORE
+# is 1), says they load from their files now: this build, the release's, has none, and an install compiles nothing. Not when
+# compile.json is gone: `pi-bolt compile --off` sets it aside while it installs the release again, to have none.
+compiled_extensions_note() {
+	if [ "$1" = 1 ] && [ -f "$INSTALL/compile.json" ]; then
+		printf 'Extensions were compiled into the build this replaced: they load from their files now; run %spi-bolt compile%s to compile them into this one.\n' "$bold" "$reset"
+	fi
 }
 
 # --- Look -------------------------------------------------------------------------------------------------------------
@@ -865,8 +880,10 @@ uninstall() {
 	for dir in "$INSTALL"/pi-bolt-linux-* "$INSTALL"/pi-bolt-darwin-*; do
 		[ -d "$dir" ] && rm -rf "$dir"
 	done
-	# (And what `pi-bolt compile` keeps or leaves here: compile.log from a failed build, and the work folder of one killed.)
-	rm -rf "$INSTALL/cache" "$INSTALL/compile.json" "$INSTALL/compile.log" "$INSTALL/channel" "$INSTALL"/.compile-*
+	# (And what `pi-bolt compile` keeps or leaves here: compile.log from a failed build, and the work folder of one killed; and
+	# what automatic updates keep: when the last one ran, its output, and its lock.)
+	rm -rf "$INSTALL/cache" "$INSTALL/compile.json" "$INSTALL/compile.log" "$INSTALL/channel" "$INSTALL"/.compile-* \
+		"$INSTALL/auto-update.json" "$INSTALL/auto-update.log" "$INSTALL/auto-update.lock"
 	target=$(readlink "$BIN_DIR/pi-bolt" 2>/dev/null || true)
 	case "$target" in
 	"$INSTALL"/*) rm -f "$BIN_DIR/pi-bolt" ;;

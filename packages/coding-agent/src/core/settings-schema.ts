@@ -289,6 +289,12 @@ export const SettingsSchema = Type.Object(
 		remoteControl: Type.Optional(
 			Type.Object(
 				{
+					enabled: Type.Optional(
+						Type.Boolean({
+							description:
+								"Turn on /remote-control and the background service (pi-bolt service). Default false. Read from the global settings only: a project's settings cannot turn it on.",
+						}),
+					),
 					port: Type.Optional(
 						Type.Integer({
 							minimum: 0,
@@ -430,6 +436,12 @@ export const SettingsSchema = Type.Object(
 						Type.Boolean({
 							description:
 								"Set by Pi-Bolt when it writes packages. A list without it and without -<source> entries is taken for an independent copy written before Pi-Bolt 0.9.1 and converted to an overlay once.",
+						}),
+					),
+					autoUpdate: Type.Optional(
+						Type.Boolean({
+							description:
+								"Install new Pi-Bolt releases in the background when an interactive session starts, at most once a day: the installer's installations only. Default false. Read from the global settings only: a project's settings cannot turn it on. PIBOLT_NO_AUTO_UPDATE=1 turns it off.",
 						}),
 					),
 				},

@@ -121,9 +121,9 @@ from the other extensions, so the limit is one extension's. Below the compiler's
   message names the extension.
 
 Leave that extension out with `pi-bolt compile --exclude <name>`, by the name `pi-bolt compile` prints for it: it still loads
-from its files at run time, and later compiles and `pi-bolt update` leave it out too (`--include <name>` takes it back). Or compile
+from its files at run time, and later compiles leave it out too (`--include <name>` takes it back). Or compile
 it anyway with `BUN_JSC_maximumAOTCandidateBytecodeSize=<n> pi-bolt compile`, `<n>` being at least the size the message gives.
-compile.json keeps that limit: a later `pi-bolt compile` without the variable, and `pi-bolt update`, build with it too, and
+compile.json keeps that limit: a later `pi-bolt compile` without the variable builds with it too, and
 `BUN_JSC_maximumAOTCandidateBytecodeSize=262144 pi-bolt compile` takes it back. The compiler warns that a big function can take
 minutes and tens of GB; one of a few hundred KB has taken seconds. The message's third remedy,
 `BUN_JSC_omitBytecodeFromStaticHeap=0`, does not apply to `pi-bolt compile`: the build keeps the release's setting.
@@ -163,6 +163,16 @@ with pauses of a second; 256 MB or more leaves it alone. A CPU limit (`--cpus`) 
 **A Herdr restart does not reopen the Pi-Bolt session.** Herdr runs the restore command with its server's `PATH`, which must
 include `pi-bolt`: start Herdr from a terminal, not with `brew services`. Agents that pi-herdr starts in other panes run stock
 Pi (`pi`), which must be installed.
+
+**`herdr agent list` shows the Pi-Bolt pane without a session.** Herdr stores an agent's session (`agent_session`) only for
+the integrations it ships, and Pi-Bolt is not one of them. The pane's state and its resume command are stored anyway, so the
+sidebar and a Herdr restart work; what is missing is the session, which automation reading `herdr agent list` or
+`herdr pane get` does not find. Start Pi-Bolt in the pane with `pi-bolt --herdr-pi`, which reports as Herdr's own Pi
+integration so the session is stored ([README](../README.md#herdr)). The flag needs the running process to be named `pi`: on
+Linux and macOS Pi-Bolt re-executes itself with `pi` as its command name, and on Windows the process has to start from a
+file named `pi.exe`, a hardlink or a copy. When that did not happen, a startup warning says so and Pi-Bolt reports as
+`pi-bolt` after all. On Windows the session is stored only for the run started as `pi.exe`: the reported resume command
+starts `pi-bolt`, so a restored pane reports as `pi-bolt` again.
 
 **Startup is slower than expected.** Check that the compiled code is used (above). Check `PI_TIMING=1` for slow extension
 factories. A cold page cache (the first start after boot or install) adds the time to read the executable from disk.
