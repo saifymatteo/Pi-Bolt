@@ -15,14 +15,13 @@
  *
  * With `pi-bolt --herdr-pi`, Pi-Bolt reports as Herdr's official Pi integration (`source=herdr:pi`, `agent=pi`)
  * explicitly; the fork's own builds do that without the flag, because their engine process is Pi-named by
- * construction (docs/HERDR.md), so stock Herdr sees its own integration in the pane. A source reports its session
- * (`pane.report_agent_session`), which anchors Herdr's canonical Pi lifecycle. Restoring differs by identity: the
- * `pi` identity needs no command — Herdr restores it with its own canonical `pi --session` plan, so no resume
- * command is reported (a reliable `pi-bolt` restart stays deferred) — while the plain `pi-bolt` identity, which
- * Herdr has no plan for, reports `pi-bolt --session` itself. Herdr only accepts the `herdr:pi`/`pi` pair from a
- * pane whose foreground process is named `pi` (its process table is fixed), so the flag re-execs Pi-Bolt with `pi`
- * as its command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt` rather than
- * `pi`.
+ * construction (docs/HERDR.md), so stock Herdr sees its own integration in the pane. That identity reports its
+ * session (`pane.report_agent_session`), which anchors Herdr's canonical Pi lifecycle, and restores with no
+ * command of its own: Herdr runs its canonical `pi --session` plan, so no resume command is reported (a reliable
+ * `pi-bolt` restart stays deferred). The plain `pi-bolt` identity, which Herdr has no plan for, reports
+ * `pi-bolt --session` itself on every state report. Herdr only accepts the `herdr:pi`/`pi` pair from a pane whose
+ * foreground process is named `pi` (its process table is fixed), so the flag re-execs Pi-Bolt with `pi` as its
+ * command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt` rather than `pi`.
  */
 
 import { isAbsolute } from "node:path";
