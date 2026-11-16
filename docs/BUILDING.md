@@ -32,6 +32,36 @@ The build writes each provider's catalog module (`packages/ai/src/providers/<pro
 first use) from that data; they are not in git (`npm run generate:catalog-modules` writes them alone).
 When a step fails, the script prints the end of its output, and the whole of it is in `.work/prepare-pi.log`.
 
+### This fork on Linux x86-64
+
+The fork's `pi-native-v*` releases use the JIT-enabled build. To make the same
+layout locally, use the signed upstream runtime tag pinned in
+[the artifact workflow](../.github/workflows/pi-native-artifacts.yml):
+
+```bash
+export PIBOLT_WORK="$PWD/.work/linux-native"
+bash scripts/fetch-runtime.sh --version bolt-v1.1.7
+node scripts/pi-native-runtime.mjs "$PIBOLT_WORK/runtime/RUNTIME_STAMP"
+bash scripts/prepare-pi.sh
+bash scripts/build-pi.sh --jit on --out out/pi-native-linux-x64/runtime
+python3 scripts/pi-native-artifacts.py launchers out/pi-native-linux-x64 linux-x64
+python3 scripts/pi-native-artifacts.py smoke out/pi-native-linux-x64
+out/pi-native-linux-x64/pi-bolt --version
+```
+
+The stamp check must pass before building: do not replace the downloaded stamp
+with the local expected value. Keeping Linux's runtime under a separate
+`PIBOLT_WORK` also avoids reusing a Windows runtime from a copied checkout.
+After moving a checkout between operating systems, `prepare-pi.sh` reinstalls
+its dependencies for the current host with lifecycle scripts disabled. If obsolete
+`dist` files trigger the "sources changed since it was built" guard, run
+`npm run clean` before preparing Pi again.
+The smoke check uses a local fake model, not provider credentials.
+
+This fork's Linux release target is x86-64 glibc only; the broader Linux targets described
+below belong to the upstream build tooling. Installation and Herdr behavior are
+covered in [HERDR.md](HERDR.md).
+
 ## Building the runtime
 
 ### Requirements

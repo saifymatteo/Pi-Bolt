@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -25,26 +26,25 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual((root / "pi-bolt.cmd").read_bytes(),
                              b'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0runtime\\pi.exe" %*\r\nexit /b %errorlevel%\r\n')
             (root / "pi-bolt.cmd").unlink()
-            ARTIFACTS.launchers(root, "darwin-arm64")
-            self.assertEqual((root / "pi-bolt").read_bytes(),
-                             b'#!/bin/sh\nexec "$(dirname "$0")/runtime/pi" "$@"\n')
-            if os.name != "nt":
-                self.assertEqual((root / "pi-bolt").stat().st_mode & 0o777, 0o755)
+            for platform in ("darwin-arm64", "linux-x64"):
+                ARTIFACTS.launchers(root, platform)
+                self.assertEqual((root / "pi-bolt").read_bytes(),
+                                 b'#!/bin/sh\nexec "$(dirname "$0")/runtime/pi" "$@"\n')
+                if os.name != "nt":
+                    self.assertEqual((root / "pi-bolt").stat().st_mode & 0o777, 0o755)
             with self.assertRaises(ValueError):
                 ARTIFACTS.launchers(root, "unknown")
 
     def test_public_launcher_forwards_arguments_and_exit_from_path_with_spaces(self):
-        # A hard-linked Node stands in for native Pi; no agent build/copy or PATH edit.
-        # Keep the fixture on the same filesystem as Node, as hard links require it.
+        # Node stands in for native Pi; copying also works when Node and the fixture are on different filesystems.
         node = Path(subprocess.check_output([shutil.which("node"), "-p", "process.execPath"], text=True).strip())
-        temp_parent = ARTIFACTS.ROOT if node.stat().st_dev == ARTIFACTS.ROOT.stat().st_dev else None
-        with tempfile.TemporaryDirectory(prefix="pi native argv ", dir=temp_parent) as temp:
+        with tempfile.TemporaryDirectory(prefix="pi native argv ") as temp:
             root = Path(temp)
             runtime = root / "runtime"
             runtime.mkdir()
             exe = runtime / ("pi.exe" if os.name == "nt" else "pi")
-            os.link(node, exe)
-            platform = "win32-x64" if os.name == "nt" else "darwin-arm64"
+            shutil.copy2(node, exe)
+            platform = {"win32": "win32-x64", "darwin": "darwin-arm64", "linux": "linux-x64"}[sys.platform]
             ARTIFACTS.launchers(root, platform)
             self.assertEqual(ARTIFACTS.check_layout(root, platform), exe)
             args = ["two words", "", "bang!", "space & separator", 'quoted "value"', "trailing slash \\"]
@@ -62,22 +62,26 @@ class ArchiveTests(unittest.TestCase):
                 (root / name).unlink()
 
     def test_release_archive_carries_one_variant_folder_with_the_runtime(self):
-        for platform in ("win32-x64", "darwin-arm64"):
+        for platform in ("win32-x64", "darwin-arm64", "linux-x64"):
             with self.subTest(platform=platform):
                 self.check_archive(platform)
 
     def check_archive(self, platform):
         windows = platform == "win32-x64"
         launcher = "pi-bolt.cmd" if windows else "pi-bolt"
-        executables = ("runtime/pi.exe",) if windows else ("runtime/pi", "runtime/pi-bin", "runtime/pi-spawn")
+        executables = ("runtime/pi.exe",) if windows else ("runtime/pi",)
+        if platform == "darwin-arm64":
+            executables += ("runtime/pi-bin", "runtime/pi-spawn")
         with tempfile.TemporaryDirectory(prefix="pi-native-contract-") as temp:
             root = Path(temp)
             output = root / "out/pi-native"
             output.mkdir(parents=True)
             files = (*executables, "runtime/theme/dark.json", "runtime/photon_rs_bg.wasm", "runtime/native/SHA256SUMS")
-            if not windows:
+            if platform == "darwin-arm64":
                 files += ("runtime/pi-bin.hot", "runtime/libsystem/libSystem.B.dylib",
                           "runtime/native/darwin/prebuilds/darwin-arm64/helper")
+            elif platform == "linux-x64":
+                files += ("runtime/native/linux/prebuilds/linux-x64/helper",)
             ARTIFACTS.launchers(output, platform)
             for name in files:
                 path = output / name
@@ -90,11 +94,12 @@ class ArchiveTests(unittest.TestCase):
             (runtime / "RUNTIME_STAMP").write_text("d615e931f06bb5a4\n")
             (root / "VERSION").write_text("1.0.8\n")
             env = {"GITHUB_REPOSITORY": "saifymatteo/Pi-Bolt", "GITHUB_SHA": "a" * 40,
-                   "GITHUB_REF": "refs/heads/feat/pi-native-identity", "GITHUB_RUN_ID": "1",
+                   "GITHUB_REF": "refs/heads/pi-bolt", "GITHUB_RUN_ID": "1",
                    "GITHUB_RUN_ATTEMPT": "1", "PI_NATIVE_RUNTIME_TAG": "bolt-v1.0.8"}
             with patch.object(ARTIFACTS, "ROOT", root), patch.dict(os.environ, env):
                 ARTIFACTS.archive(output, platform)
-            variant = ARTIFACTS.release_variant(platform)
+            variant = f"pi-bolt-{platform}-jit"
+            self.assertEqual(ARTIFACTS.release_variant(platform), variant)
             suffix = "zip" if windows else "tar.gz"
             archive = root / f"out/pi-native-artifacts/{variant}.{suffix}"
             # The local layout (launchers beside runtime/) never enters the release archive; the runtime does, under the
@@ -124,6 +129,40 @@ class ArchiveTests(unittest.TestCase):
             metadata = json.loads(archive.with_name("build-metadata.json").read_text())
             self.assertEqual(metadata["platform"], platform)
             self.assertEqual(metadata["runtimeStamp"], "d615e931f06bb5a4")
+            self.assertEqual(metadata["jit"], "on")
+            self.assertEqual(metadata["runtimeSha256"], hashlib.sha256(b"test engine").hexdigest())
+            self.assertEqual(metadata["runtimeRepository"], "opensec-git/Pi-Bolt")
+
+    def test_unsupported_release_variants_are_rejected(self):
+        for platform in ("linux-arm64", "linux-x64-musl", "linux-x64-baseline", "unknown"):
+            with self.subTest(platform=platform), self.assertRaises(ValueError):
+                ARTIFACTS.release_variant(platform)
+
+    def test_linux_smoke_checks_linux_layout_and_executable_without_darwin_helpers(self):
+        with tempfile.TemporaryDirectory(prefix="pi-native-smoke-") as temp:
+            root = Path(temp)
+            ARTIFACTS.launchers(root, "linux-x64")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            for name in ("pi", "theme/dark.json", "theme/light.json", "assets", "export-html/template.html",
+                         "photon_rs_bg.wasm", "native", "docs", "examples"):
+                path = runtime / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            # Stop before any model or native process: this contract checks smoke's platform-specific preflight only.
+            with patch.object(ARTIFACTS.sys, "platform", "linux"), \
+                    patch.object(ARTIFACTS, "check_layout", wraps=ARTIFACTS.check_layout) as layout, \
+                    patch.object(ARTIFACTS.os, "access", return_value=True) as access, \
+                    patch.object(ARTIFACTS, "fake_model", side_effect=RuntimeError("preflight passed")) as model:
+                with self.assertRaisesRegex(RuntimeError, "preflight passed"):
+                    ARTIFACTS.smoke(root)
+                layout.assert_called_once_with(root, "linux-x64")
+                access.assert_called_once_with(runtime / "pi", os.X_OK)
+                model.assert_called_once_with()
+                access.return_value = False
+                with self.assertRaisesRegex(AssertionError, "Missing executable/mode: pi"):
+                    ARTIFACTS.smoke(root)
+                model.assert_called_once_with()
 
 
 if __name__ == "__main__":

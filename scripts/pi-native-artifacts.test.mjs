@@ -14,9 +14,9 @@ const scripts = steps.map((step) => step.run ?? "").join("\n");
 
 test("artifact workflow is restricted to the fork branch with read-only permissions", () => {
 	assert.deepEqual(Object.keys(workflow.on).sort(), ["push", "workflow_dispatch"]);
-	assert.deepEqual(workflow.on.push, { branches: ["feat/pi-native-identity"], tags: ["pi-native-v*"] });
+	assert.deepEqual(workflow.on.push, { branches: ["feat/pi-native-identity", "pi-bolt"], tags: ["pi-native-v*"] });
 	assert.deepEqual(workflow.permissions, { contents: "read" });
-	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || startsWith(github.ref, 'refs/tags/pi-native-v'))");
+	assert.equal(job.if, "github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || github.ref == 'refs/heads/pi-bolt' || startsWith(github.ref, 'refs/tags/pi-native-v'))");
 	assert.deepEqual(Object.keys(workflow.jobs), ["artifacts", "release"]);
 	assert.equal(job.permissions, undefined);
 	// The build jobs get no credentials at all; only the release job may sign (its own key, write-scoped).
@@ -24,10 +24,11 @@ test("artifact workflow is restricted to the fork branch with read-only permissi
 	assert.match(source, /secrets\.PI_NATIVE_RELEASE_KEY/);
 });
 
-test("only Windows x64 and native macOS ARM64 build, with the repository's pinned actions", () => {
+test("Windows x64, native macOS ARM64 and glibc Linux x64 build, with the repository's pinned actions", () => {
 	assert.deepEqual(job.strategy.matrix.include, [
 		{ runner: "windows-2025", platform: "win32-x64" },
 		{ runner: "macos-15", platform: "darwin-arm64" },
+		{ runner: "ubuntu-24.04", platform: "linux-x64" },
 	]);
 	assert.equal(job.strategy["fail-fast"], false);
 	assert.match(scripts, /process\.platform.*process\.arch/);
@@ -45,7 +46,9 @@ test("only Windows x64 and native macOS ARM64 build, with the repository's pinne
 
 test("upstream signed runtime is pinned and its original adjacent stamp gates every build", () => {
 	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.1.7");
-	assert.match(scripts, /bash scripts\/fetch-runtime\.sh --version "\$PI_NATIVE_RUNTIME_TAG"/);
+	const unixRuntime = steps.find((step) => step.name === "Signed upstream runtime (Unix)");
+	assert.equal(unixRuntime.if, "runner.os != 'Windows'");
+	assert.equal(unixRuntime.run, 'bash scripts/fetch-runtime.sh --version "$PI_NATIVE_RUNTIME_TAG"');
 	assert.match(scripts, /https:\/\/github\.com\/opensec-git\/Pi-Bolt\/releases\/download/);
 	assert.match(scripts, /pkeyutl -verify -pubin -inkey keys\\release\.pub/);
 	assert.match(scripts, /foreach \(\$name in 'pi-bolt-runtime-win32-x64.zip', 'RUNTIME_STAMP'\)/);
@@ -60,9 +63,15 @@ test("upstream signed runtime is pinned and its original adjacent stamp gates ev
 });
 
 test("offline preparation, JIT on, native regressions and full-output archive are mandatory", () => {
+	for (const name of ["Prepare Pi offline (Unix)", "Build JIT-on Pi (Unix)", "Native Pi regression tests (Unix)"]) {
+		const step = steps.find((step) => step.name === name);
+		assert.equal(step.if, "runner.os != 'Windows'");
+		assert.equal(step["continue-on-error"], undefined);
+	}
 	assert.match(scripts, /bash scripts\/prepare-pi\.sh/);
 	assert.match(scripts, /npm ci --ignore-scripts/);
 	assert.match(scripts, /npm run build:offline/);
+	assert.match(scripts, /python scripts\/pi-native-installer\.test\.py/);
 	const regressions = steps.find((step) => step.name === "Focused offline source regressions");
 	assert.equal(regressions["working-directory"], "packages/coding-agent");
 	for (const file of ["config-pi-identity", "herdr-extension", "pi-bolt-update-rollback", "pi-bolt-jit-hint"]) {
@@ -90,22 +99,23 @@ test("offline preparation, JIT on, native regressions and full-output archive ar
 	assert.equal(upload.if, undefined);
 });
 
-test("a pi-native-v* tag publishes both archives as a signed release", () => {
+test("a pi-native-v* tag publishes all three archives and metadata as a signed release", () => {
 	const release = workflow.jobs.release;
 	assert.equal(release.needs, "artifacts");
 	assert.equal(release["runs-on"], "ubuntu-latest");
 	assert.equal(release.if, "github.repository == 'saifymatteo/Pi-Bolt' && startsWith(github.ref, 'refs/tags/pi-native-v')");
 	assert.deepEqual(release.permissions, { contents: "write" });
 	const runs = release.steps.map((step) => step.run ?? "").join("\n");
-	for (const platform of ["win32-x64", "darwin-arm64"]) {
+	for (const platform of ["win32-x64", "darwin-arm64", "linux-x64"]) {
 		assert.match(runs, new RegExp(`gh run download .*--name pi-native-${platform}`));
-		assert.match(runs, new RegExp(`sha256sum -c SHA256SUMS`));
+		assert.ok(runs.includes(`(cd stage/${platform} && sha256sum -c SHA256SUMS)`));
+		assert.ok(runs.includes(`cp stage/${platform}/build-metadata.json out/release/build-metadata-${platform}.json`));
 		assert.match(runs, new RegExp(`build-metadata-${platform}\\.json`));
 	}
 	// The updater reads the version from the first line and the installers and archives by name.
-	assert.match(runs, /cp stage\/win32-x64\/pi-bolt-win32-x64-jit\.zip stage\/darwin-arm64\/pi-bolt-darwin-arm64-jit\.tar\.gz out\/release\//);
+	assert.match(runs, /cp stage\/win32-x64\/pi-bolt-win32-x64-jit\.zip stage\/darwin-arm64\/pi-bolt-darwin-arm64-jit\.tar\.gz stage\/linux-x64\/pi-bolt-linux-x64-jit\.tar\.gz out\/release\//);
 	assert.match(runs, /echo "# pi-bolt \$version"/);
-	assert.match(runs, /sha256sum install\.ps1 install\.sh pi-bolt-win32-x64-jit\.zip pi-bolt-darwin-arm64-jit\.tar\.gz/);
+	assert.match(runs, /sha256sum install\.ps1 install\.sh pi-bolt-win32-x64-jit\.zip pi-bolt-darwin-arm64-jit\.tar\.gz pi-bolt-linux-x64-jit\.tar\.gz build-metadata-\*\.json/);
 	// Signed with the fork key (CI secret); the built-in public key must take the signature before publishing.
 	assert.match(runs, /pkeyutl -sign -rawin -in out\/release\/SHA256SUMS -inkey out\/release-signing\.key -out out\/release\/SHA256SUMS\.sig/);
 	assert.match(runs, /pkeyutl -verify -pubin -inkey keys\/pi-native-release\.pub/);

@@ -25,7 +25,7 @@ def launchers(directory, platform):
         (directory / "pi-bolt.cmd").write_text(
             '@echo off\nsetlocal DisableDelayedExpansion\n"%~dp0runtime\\pi.exe" %*\nexit /b %errorlevel%\n',
             encoding="utf8", newline="\r\n")
-    elif platform == "darwin-arm64":
+    elif platform in ("darwin-arm64", "linux-x64"):
         launcher = directory / "pi-bolt"
         launcher.write_text('#!/bin/sh\nexec "$(dirname "$0")/runtime/pi" "$@"\n', encoding="utf8", newline="\n")
         launcher.chmod(0o755)
@@ -53,11 +53,12 @@ def check_layout(directory, platform):
 
 
 def smoke(directory):
-    exe = check_layout(directory, "win32-x64" if os.name == "nt" else "darwin-arm64")
+    platform = {"win32": "win32-x64", "darwin": "darwin-arm64", "linux": "linux-x64"}[sys.platform]
+    exe = check_layout(directory, platform)
     runtime = directory / "runtime"
-    if sys.platform == "darwin":
-        for name in ("pi", "pi-bin", "pi-spawn"):
-            assert os.access(runtime / name, os.X_OK), f"Missing executable/mode: {name}"
+    executables = {"win32-x64": (), "darwin-arm64": ("pi", "pi-bin", "pi-spawn"), "linux-x64": ("pi",)}
+    for name in executables[platform]:
+        assert os.access(runtime / name, os.X_OK), f"Missing executable/mode: {name}"
     for name in ("theme/dark.json", "theme/light.json", "assets", "export-html/template.html",
                  "photon_rs_bg.wasm", "native", "docs", "examples"):
         assert (runtime / name).exists(), f"Missing adjacent asset: {name}"
@@ -112,14 +113,16 @@ export default function () {
         assert "Done:" in output, output
         (directory / "pi-native-identity.json").write_text(json.dumps(identity, indent=2) + "\n")
 
-    # Existing fake-model check exercises the adjacent photon WASM and resize worker on both platforms.
+    # Existing fake-model check exercises the adjacent photon WASM and resize worker on all platforms.
     subprocess.run([sys.executable, str(ROOT / "tests/pi/image.py"), str(exe)], check=True, timeout=1000)
     print("PASS public pi-bolt, private Pi OS identity, argv forwarding, compiled image and image worker")
 
 
 def release_variant(platform):
     """The variant folder name the updater and installers expect: pi-bolt-<platform>-<variant>, holding the runtime."""
-    return "pi-bolt-win32-x64-jit" if platform == "win32-x64" else "pi-bolt-darwin-arm64-jit"
+    if platform not in ("win32-x64", "darwin-arm64", "linux-x64"):
+        raise ValueError(f"Unsupported native platform: {platform}")
+    return f"pi-bolt-{platform}-jit"
 
 
 def archive(directory, platform):
@@ -129,7 +132,7 @@ def archive(directory, platform):
     (pi-bolt-<platform>-<variant>/ with the native Pi and its adjacent assets): `pi-bolt update` on Windows unpacks
     pi-bolt-win32-<variant>.zip and installs that folder in place; the installers lay the same folder into the install dir.
     """
-    assert platform in ("win32-x64", "darwin-arm64"), platform
+    variant = release_variant(platform)
     check_layout(directory, platform)
     runtime = ROOT / ".work/runtime" / ("bun.exe" if platform == "win32-x64" else "bun")
     stamp = (runtime.parent / "RUNTIME_STAMP").read_text().strip()
@@ -143,7 +146,6 @@ def archive(directory, platform):
     }
     (directory / "build-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
-    variant = release_variant(platform)
     stage = ROOT / ".work/pi-native-release"
     shutil.rmtree(stage, ignore_errors=True)
     inner = stage / variant

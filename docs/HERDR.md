@@ -16,25 +16,41 @@ The startup hint remains:
 
 ## Get a test build
 
-The fork's **Pi native artifacts** Actions workflow targets Windows x64 and macOS
-Apple Silicon, including M2. Two ways to get a build from `saifymatteo/Pi-Bolt`:
+The fork's **Pi native artifacts** Actions workflow targets Linux x86-64 with glibc,
+Windows x64, and macOS Apple Silicon, including M2. All three use the JIT-enabled
+variant. Linux ARM64, musl/Alpine, and separate baseline-CPU variants are not
+published by this fork. Two ways to get a build from `saifymatteo/Pi-Bolt`:
 
-- **Release (recommended):** pushing a `pi-native-v*` tag builds both platforms and
+- **Release (recommended):** pushing a `pi-native-v*` tag builds all three platforms and
   publishes a GitHub release at that tag with the archives, a combined LF
   `SHA256SUMS`, per-platform build metadata, and the installer scripts. Tags with a
   `-trial` suffix publish as prereleases; plain tags are full releases marked Latest.
-- **CI artifact:** every push to `feat/pi-native-identity` uploads per-platform
+- **CI artifact:** every push to `pi-bolt` or `feat/pi-native-identity` uploads per-platform
   artifacts to the workflow run, kept for 14 days.
 
-Extract the **complete archive** into its own directory. The public command is
-`pi-bolt.cmd` on Windows or `pi-bolt` on macOS. Keep its private `runtime` directory
-and all adjacent assets intact; copying just an executable is insufficient. Verify
-first with `sha256sum -c SHA256SUMS`. The releases also carry `install.ps1` /
-`install.sh`, which download, verify, and install the `pi-bolt` launcher for you
-without touching Node `pi`.
+Releases carry a platform folder containing the private Pi executable and its
+adjacent assets. Extract the **complete archive**; copying just an executable is
+insufficient. Verify it first with `sha256sum -c SHA256SUMS` (or `shasum -a 256 -c
+SHA256SUMS` on macOS). The local smoke-test layout instead has a public
+`pi-bolt.cmd` on Windows or `pi-bolt` on Linux/macOS beside a private `runtime`
+directory.
 
-These are trial builds, not installers. Extracting one does not replace installed
-Pi or change PATH. A macOS archive is not notarized; Gatekeeper may block
+Release installers create the public `pi-bolt` command without changing Node Pi's
+files. On Linux or macOS, once a release includes your platform:
+
+```sh
+curl -fsSL https://github.com/saifymatteo/Pi-Bolt/releases/latest/download/install.sh | sh
+```
+
+The Unix installer defaults to `x64-jit` on Linux or `arm64-jit` on macOS, checks
+the archive's SHA-256 checksum, and installs under `~/.pi-bolt`. It uses
+`sha256sum` on Linux or `shasum` when unavailable. The standalone Unix installer
+checks archive hashes only; `pi-bolt update` also authenticates the installer
+against the release's signed checksums. Desktop clipboard integration on Wayland
+needs `wl-clipboard`; X11 writes need `xclip` or `xsel`.
+
+Extracting an archive alone does not replace installed Pi or change PATH.
+A macOS archive is not notarized; Gatekeeper may block
 downloaded code. Assess the artifact before changing its quarantine attributes;
 the workflow does not remove quarantine for you.
 
@@ -47,7 +63,7 @@ the workflow does not remove quarantine for you.
    & "D:\path\to\extracted-build\pi-bolt.cmd"
    ```
 
-   On macOS:
+   On Linux or macOS, for a local smoke-test build:
 
    ```sh
    /path/to/extracted-build/pi-bolt
@@ -107,9 +123,9 @@ signed with `pi-native-release.pub` carry the upstream release key, so their
 `pi-bolt update` refuses this release's signature — run the installer once; from
 then on `pi-bolt update` works.
 
-Release archives carry one variant folder (`pi-bolt-win32-x64-jit/` with the private
-`pi.exe`, or `pi-bolt-darwin-arm64-jit/` with its `pi` launcher and `pi-bin`); the
-installers lay that folder into `~/.pi-bolt` and link the public `pi-bolt` shim to
+Release archives carry one variant folder (`pi-bolt-linux-x64-jit/` with `pi`,
+`pi-bolt-win32-x64-jit/` with `pi.exe`, or `pi-bolt-darwin-arm64-jit/` with its `pi`
+launcher and `pi-bin`); the installers lay that folder into `~/.pi-bolt` and link the public `pi-bolt` shim to
 it, keeping the replaced build beside it as `<folder>.previous` for `--rollback`.
 
 Useful source checks, from the repository root:
