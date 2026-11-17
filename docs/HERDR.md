@@ -28,6 +28,24 @@ published by this fork. Two ways to get a build from `saifymatteo/Pi-Bolt`:
 - **CI artifact:** every push to `pi-bolt` or `feat/pi-native-identity` uploads per-platform
   artifacts to the workflow run, kept for 14 days.
 
+If a commit already passed all three platforms but a new tag build cannot acquire
+a macOS runner, maintainers can publish the existing verified artifacts instead:
+
+```sh
+# Replace the tag and source run ID with the release you want to publish.
+gh workflow run pi-native-artifacts.yml --repo saifymatteo/Pi-Bolt --ref pi-bolt \
+  --field release_tag="pi-native-vX.Y.Z" --field source_run_id="SUCCESSFUL_RUN_ID"
+```
+
+Both fields are required for promotion. The tag must already exist and point to
+the successful source run's exact commit. The publisher requires all three
+unexpired platform artifacts, verifies their checksums and metadata against the
+tag's version and engine stamp, then signs and publishes them with the existing
+CI release key. Installers and the verification key come from the release tag,
+not the publishing branch. Promotion does not move the tag or rebuild the
+application; build metadata retains the original source run and ref. Normal tag
+pushes still build and publish all three platforms.
+
 Releases carry a platform folder containing the private Pi executable and its
 adjacent assets. Extract the **complete archive**; copying just an executable is
 insufficient. Verify it first with `sha256sum -c SHA256SUMS` (or `shasum -a 256 -c

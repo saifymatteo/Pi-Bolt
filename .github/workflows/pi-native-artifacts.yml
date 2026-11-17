@@ -2,6 +2,15 @@ name: Pi native artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful run to promote (requires release_tag)
+        required: false
+        type: string
+      release_tag:
+        description: Existing pi-native version tag to publish (requires source_run_id)
+        required: false
+        type: string
   push:
     branches: [feat/pi-native-identity, pi-bolt]
     tags: ["pi-native-v*"]
@@ -10,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pi-native-artifacts-${{ github.ref }}
+  group: pi-native-artifacts-${{ github.event_name == 'workflow_dispatch' && (inputs.source_run_id != '' || inputs.release_tag != '') && format('promotion-{0}', inputs.release_tag) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -20,8 +29,26 @@ env:
   DO_NOT_TRACK: "1"
 
 jobs:
+  validate-inputs:
+    if: github.repository == 'saifymatteo/Pi-Bolt'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate promotion inputs before any artifact downloads
+        env:
+          INPUT_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          if [[ -n "$INPUT_SOURCE_RUN_ID" || -n "$INPUT_RELEASE_TAG" ]]; then
+            [[ -n "$INPUT_SOURCE_RUN_ID" && -n "$INPUT_RELEASE_TAG" ]] || { echo 'source_run_id and release_tag must be supplied together' >&2; exit 1; }
+            [[ "$INPUT_SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'source_run_id must be decimal' >&2; exit 1; }
+            version_tag='^pi-native-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+            [[ "$INPUT_RELEASE_TAG" =~ $version_tag ]] || { echo 'release_tag must be a valid pi-native version tag' >&2; exit 1; }
+          fi
+
   artifacts:
-    if: github.repository == 'saifymatteo/Pi-Bolt' && (github.ref == 'refs/heads/feat/pi-native-identity' || github.ref == 'refs/heads/pi-bolt' || startsWith(github.ref, 'refs/tags/pi-native-v'))
+    needs: validate-inputs
+    if: github.repository == 'saifymatteo/Pi-Bolt' && !(github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '') && (github.ref == 'refs/heads/feat/pi-native-identity' || github.ref == 'refs/heads/pi-bolt' || startsWith(github.ref, 'refs/tags/pi-native-v'))
     strategy:
       fail-fast: false
       matrix:
@@ -93,7 +120,7 @@ jobs:
           exit $LASTEXITCODE
       - name: Workflow and packaging contracts
         run: |
-          node --test scripts/pi-native-artifacts.test.mjs
+          node --test scripts/pi-native-artifacts.test.mjs scripts/pi-native-provenance.test.mjs
           python scripts/pi-native-artifacts.test.py
           python scripts/pi-native-installer.test.py
       - name: Focused offline source regressions
@@ -150,27 +177,48 @@ jobs:
           compression-level: 0
           retention-days: 14
 
-  # A pi-native-v* tag publishes the archives from this run; trial tags remain prereleases.
+  # Tags publish this run; manual promotion reuses a verified run. Trial tags remain prereleases.
   release:
-    if: github.repository == 'saifymatteo/Pi-Bolt' && startsWith(github.ref, 'refs/tags/pi-native-v')
-    needs: artifacts
+    if: >-
+      !cancelled() && github.repository == 'saifymatteo/Pi-Bolt' && needs.validate-inputs.result == 'success' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '') ||
+      (startsWith(github.ref, 'refs/tags/pi-native-v') && needs.artifacts.result == 'success'))
+    needs: [validate-inputs, artifacts]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+      actions: read
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id || github.run_id }}
+      RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '' && 'promotion' || 'tag' }}
     steps:
-      # The installers are copied from this tag's tree, so the release job needs its own checkout.
+      # The publisher helper may not exist in the older release tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Download all platform artifacts from this run
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          path: release-source
+          persist-credentials: false
+      - name: Provenance validator regressions
+        run: node --test scripts/pi-native-provenance.test.mjs
+      - name: Record the immutable release source
+        run: echo "RELEASE_SHA=$(git -C release-source rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Download source run metadata and all platform artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p stage/win32-x64 stage/darwin-arm64 stage/linux-x64
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-win32-x64 --dir stage/win32-x64
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-darwin-arm64 --dir stage/darwin-arm64
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-linux-x64 --dir stage/linux-x64
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > stage/source-run.json
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-win32-x64 --dir stage/win32-x64
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-darwin-arm64 --dir stage/darwin-arm64
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-linux-x64 --dir stage/linux-x64
+      - name: Validate source run and all platform provenance
+        run: node scripts/pi-native-provenance.mjs stage/source-run.json stage release-source "$RELEASE_MODE"
       - name: Verify each archive against its checksums
         run: |
           (cd stage/win32-x64 && sha256sum -c SHA256SUMS)
@@ -180,12 +228,12 @@ jobs:
         run: |
           mkdir -p out/release
           cp stage/win32-x64/pi-bolt-win32-x64-jit.zip stage/darwin-arm64/pi-bolt-darwin-arm64-jit.tar.gz stage/linux-x64/pi-bolt-linux-x64-jit.tar.gz out/release/
-          cp scripts/install/install.ps1 scripts/install/install.sh out/release/
+          cp release-source/scripts/install/install.ps1 release-source/scripts/install/install.sh out/release/
           cp stage/win32-x64/build-metadata.json out/release/build-metadata-win32-x64.json
           cp stage/darwin-arm64/build-metadata.json out/release/build-metadata-darwin-arm64.json
           cp stage/linux-x64/build-metadata.json out/release/build-metadata-linux-x64.json
           # The updater's fetchSignedSums reads the version from the first line, and the installers and archives by name.
-          version="${GITHUB_REF_NAME#pi-native-v}"
+          version="${RELEASE_TAG#pi-native-v}"
           {
             echo "# pi-bolt $version"
             (cd out/release && sha256sum install.ps1 install.sh pi-bolt-win32-x64-jit.zip pi-bolt-darwin-arm64-jit.tar.gz pi-bolt-linux-x64-jit.tar.gz build-metadata-*.json)
@@ -198,16 +246,17 @@ jobs:
           openssl pkeyutl -sign -rawin -in out/release/SHA256SUMS -inkey out/release-signing.key -out out/release/SHA256SUMS.sig
           rm out/release-signing.key
           # The executable's built-in key must take the signature: catch a key/step mismatch before publishing.
-          openssl pkeyutl -verify -pubin -inkey keys/pi-native-release.pub -rawin -in out/release/SHA256SUMS -sigfile out/release/SHA256SUMS.sig
+          openssl pkeyutl -verify -pubin -inkey release-source/keys/pi-native-release.pub -rawin -in out/release/SHA256SUMS -sigfile out/release/SHA256SUMS.sig
       - name: Publish the release at this tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="out/release-notes.md"
           {
-            echo "Pi-Bolt ($GITHUB_REF_NAME): the compiled Pi replacement."
+            echo "Pi-Bolt ($RELEASE_TAG): the compiled Pi replacement."
             echo ""
-            echo "- Commit: $GITHUB_SHA"
+            echo "- Commit: $RELEASE_SHA"
+            echo "- Source run: $SOURCE_RUN_ID"
             echo "- Signed upstream engine: $PI_NATIVE_RUNTIME_TAG"
             echo ""
             echo "### Usage"
@@ -227,7 +276,7 @@ jobs:
             echo "- Herdr session restore may relaunch Node Pi instead of this build."
           } > "$notes"
           # Trial tags stay prereleases; plain pi-native-v* tags are full releases marked Latest.
-          flags=(--title "Pi-Bolt native $GITHUB_REF_NAME" --notes-file "$notes")
-          case "$GITHUB_REF_NAME" in *-trial*) flags+=(--prerelease) ;; esac
-          gh release create "$GITHUB_REF_NAME" out/release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+          flags=(--title "Pi-Bolt native $RELEASE_TAG" --notes-file "$notes" --verify-tag)
+          case "$RELEASE_TAG" in *-trial*) flags+=(--prerelease) ;; esac
+          gh release create "$RELEASE_TAG" out/release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
 
