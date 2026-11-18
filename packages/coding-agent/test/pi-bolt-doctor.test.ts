@@ -319,12 +319,14 @@ describe("runDoctor", () => {
 		const agentDir = join(home, ".pi", "agent");
 		const project = join(home, "project");
 		const bin = join(home, "bin");
+		const appData = join(home, "AppData", "Roaming");
+		const zedDir = process.platform === "win32" ? join(appData, "Zed") : join(home, ".config", "zed");
 		for (const dir of [
 			project,
 			bin,
 			join(agentDir, "extensions", "ffi-ext"),
 			join(agentDir, "extensions", "ffi-lazy"),
-			join(home, ".config", "zed"),
+			zedDir,
 		]) {
 			mkdirSync(dir, { recursive: true });
 		}
@@ -350,13 +352,14 @@ describe("runDoctor", () => {
 			}),
 		);
 		writeFileSync(
-			join(home, ".config", "zed", "settings.json"),
+			join(zedDir, "settings.json"),
 			'{ "agent_servers": { "Pi-Bolt": { "command": "/no/such/pi-bolt", "args": ["--acp"] } } }',
 		);
 		writeFileSync(join(bin, "pi-bolt"), "#!/bin/sh\necho 1.0.0 (Pi-Bolt 0.1.0, linux-x64, JIT off)\n");
 		chmodSync(join(bin, "pi-bolt"), 0o755);
 		vi.stubEnv("HOME", home);
 		vi.stubEnv("USERPROFILE", home);
+		vi.stubEnv("APPDATA", appData);
 		vi.stubEnv("XDG_CONFIG_HOME", "");
 		vi.stubEnv("PATH", bin);
 		vi.stubEnv("PIBOLT_VARIANT", "arm64");
@@ -368,6 +371,7 @@ describe("runDoctor", () => {
 
 		const status = await runDoctor(["--offline"], { cwd: project, agentDir, extensionFactories: [] });
 
+		const pathOutput = output.replace(/\\/g, "/");
 		expect(status).toBe(0);
 		expect(output).toMatch(/^Pi-Bolt doctor\n/);
 		expect(output).toMatch(/ {2}Pi-Bolt +0\.8\.8 \(Pi /);
@@ -375,21 +379,23 @@ describe("runDoctor", () => {
 		expect(output).toContain("runtime stamp 0f61517d28995399");
 		expect(output).toContain("not checked (offline)");
 		expect(output).toContain("PIBOLT_VARIANT=arm64");
-		expect(output).toMatch(/run time +~\/\.pi\/agent\/extensions\/fine\.ts: interpreted, loaded in \d+ ms/);
-		expect(output).toMatch(/failed +~\/\.pi\/agent\/extensions\/broken\.ts: boom/);
-		expect(output).toMatch(/ffi-ext\/index\.ts: .*uses bun:ffi \(ffi-ext\/index\.ts imports it\)/);
+		expect(pathOutput).toMatch(/run time +~\/\.pi\/agent\/extensions\/fine\.ts: interpreted, loaded in \d+ ms/);
+		expect(pathOutput).toMatch(/failed +~\/\.pi\/agent\/extensions\/broken\.ts: boom/);
+		expect(pathOutput).toMatch(/ffi-ext\/index\.ts: .*uses bun:ffi \(ffi-ext\/index\.ts imports it\)/);
 		expect(output).toContain("needs Pi-Bolt's JIT build (bun:ffi); switch with: ");
 		// #62: one that fails is a problem; one that only imports bun:ffi and loads is a suggestion.
 		const problems = output.slice(output.indexOf("\nProblems\n"), output.indexOf("\nSuggestions\n"));
 		const suggestions = output.slice(output.indexOf("\nSuggestions\n"));
 		expect(problems).toContain("broken.ts");
-		expect(problems).toContain("ffi-ext/index.ts needs Pi-Bolt's JIT build");
+		expect(problems.replace(/\\/g, "/")).toContain("ffi-ext/index.ts needs Pi-Bolt's JIT build");
 		expect(problems).not.toContain("ffi-lazy");
-		expect(suggestions).toMatch(/ffi-lazy\/index\.ts needs Pi-Bolt's JIT build .*did not call it while loading/);
+		expect(suggestions.replace(/\\/g, "/")).toMatch(
+			/ffi-lazy\/index\.ts needs Pi-Bolt's JIT build .*did not call it while loading/,
+		);
 		expect(output).toContain("only Pi loads");
 		expect(output).toContain("git:https://***@github.com/me/private-ext");
 		expect(output).toContain('Zed\'s agent server "Pi-Bolt" runs /no/such/pi-bolt, which does not exist');
-		expect(output).toContain("~/bin/pi-bolt (not this Pi-Bolt)");
+		expect(pathOutput).toContain("~/bin/pi-bolt (not this Pi-Bolt)");
 		expect(output).not.toContain(home);
 		expect(output).not.toContain("ghp_");
 	});
