@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       local_macos_release:
-        description: Draft intake release for signed SSH-local macOS (requires both promotion inputs)
+        description: Numeric draft intake release ID for signed SSH-local macOS (requires both promotion inputs)
         required: false
         type: string
   push:
@@ -50,7 +50,7 @@ jobs:
             version_tag='^pi-native-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
             [[ "$INPUT_RELEASE_TAG" =~ $version_tag ]] || { echo 'release_tag must be a valid pi-native version tag' >&2; exit 1; }
             if [[ -n "$INPUT_LOCAL_MACOS_RELEASE" ]]; then
-              [[ "$INPUT_LOCAL_MACOS_RELEASE" =~ ^pi-native-local-macos-[A-Za-z0-9._-]+$ ]] || { echo 'invalid local macOS intake tag' >&2; exit 1; }
+              [[ "$INPUT_LOCAL_MACOS_RELEASE" =~ ^[1-9][0-9]*$ ]] || { echo 'local macOS intake release ID must be positive decimal' >&2; exit 1; }
             fi
           fi
 
@@ -227,10 +227,12 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > stage/source-run.json
           gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-win32-x64 --dir stage/win32-x64
           if [[ -n "$LOCAL_MACOS_RELEASE" ]]; then
-            draft_source="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LOCAL_MACOS_RELEASE" --jq 'select(.draft == true) | .target_commitish')"
-            [[ "$draft_source" == "$RELEASE_SHA" ]] || { echo 'macOS intake must be a draft at the release source commit' >&2; exit 1; }
-            gh release download "$LOCAL_MACOS_RELEASE" --repo "$GITHUB_REPOSITORY" --dir stage/darwin-arm64 \
-              --pattern pi-bolt-darwin-arm64-jit.tar.gz --pattern build-metadata.json --pattern build-metadata.json.sig
+            # By-tag endpoints omit drafts. Resolve this draft by ID and download its validated exact asset IDs.
+            gh api "repos/$GITHUB_REPOSITORY/releases/$LOCAL_MACOS_RELEASE" > stage/local-release.json
+            node scripts/pi-native-local-build.mjs --intake stage/local-release.json "$LOCAL_MACOS_RELEASE" "$RELEASE_SHA" > stage/local-assets.txt
+            while read -r asset_id name; do
+              gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" --header 'Accept: application/octet-stream' > "stage/darwin-arm64/$name"
+            done < stage/local-assets.txt
             gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" > stage/source-jobs.json
           else
             gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-darwin-arm64 --dir stage/darwin-arm64

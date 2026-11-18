@@ -85,13 +85,18 @@ reviewed. Changing the trusted builder key requires a reviewed publisher commit.
 2. Create a **draft**, not a public release, named `pi-native-local-macos-<version>`
    with `--target <full source commit>`. Upload exactly
    `pi-bolt-darwin-arm64-jit.tar.gz`, `build-metadata.json` and `build-metadata.json.sig`.
-3. Dispatch the publisher from its reviewed `pi-bolt` commit:
+3. Find the draft's numeric release ID with `gh api repos/saifymatteo/Pi-Bolt/releases`.
+   Dispatch the publisher from its reviewed `pi-bolt` commit:
 
    ```bash
    gh workflow run pi-native-artifacts.yml -R saifymatteo/Pi-Bolt --ref pi-bolt \
      -f source_run_id=<CI run> -f release_tag=pi-native-v<version> \
-     -f local_macos_release=pi-native-local-macos-<version>
+     -f local_macos_release=<numeric-draft-release-ID>
    ```
+
+The intake input is an ID, not a tag: GitHub's by-tag API omits draft releases.
+The publisher resolves the same-repository draft by ID, validates the exact source
+commit and exactly three uploaded fixed-name assets, then downloads their IDs.
 
 The source run must be completed and match the immutable tag. Its overall result
 may be failure or cancellation, but both Linux and Windows artifact attempts

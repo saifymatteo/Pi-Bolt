@@ -133,7 +133,7 @@ test("manual promotion validates paired inputs before downloads and isolates con
 	assert.deepEqual(workflow.on.workflow_dispatch.inputs, {
 		source_run_id: { description: "CI source run to promote (requires release_tag)", required: false, type: "string" },
 		release_tag: { description: "Existing pi-native version tag to publish (requires source_run_id)", required: false, type: "string" },
-		local_macos_release: { description: "Draft intake release for signed SSH-local macOS (requires both promotion inputs)", required: false, type: "string" },
+		local_macos_release: { description: "Numeric draft intake release ID for signed SSH-local macOS (requires both promotion inputs)", required: false, type: "string" },
 	});
 	const validation = workflow.jobs["validate-inputs"];
 	assert.equal(validation.if, "github.repository == 'saifymatteo/Pi-Bolt'");
@@ -238,9 +238,11 @@ test("publisher uses the target tree, source run metadata and provenance before 
 test("local macOS intake is explicit, same-repository, authenticated before signing, and never a runner", () => {
 	const validation = workflow.jobs["validate-inputs"].steps[0];
 	for (const [run, tag, local, valid] of [
-		["17", "pi-native-v1.2.5", "pi-native-local-macos-1.2.5", true],
-		["", "", "pi-native-local-macos-1.2.5", false],
-		["17", "", "pi-native-local-macos-1.2.5", false],
+		["17", "pi-native-v1.2.5", "450147883", true],
+		["", "", "450147883", false],
+		["17", "", "450147883", false],
+		["17", "pi-native-v1.2.5", "0", false],
+		["17", "pi-native-v1.2.5", "0450147883", false],
 		["17", "pi-native-v1.2.5", "pi-native-v1.2.5", false],
 		["17", "pi-native-v1.2.5", "pi-native-local-macos-../bad", false],
 		["17", "pi-native-v1.2.5", "pi-native-local-macos-1;echo bad", false],
@@ -256,13 +258,14 @@ test("local macOS intake is explicit, same-repository, authenticated before sign
 	const github = { event_name: "workflow_dispatch" };
 	const inputs = { source_run_id: "17", release_tag: "pi-native-v1.2.5", local_macos_release: "" };
 	assert.equal(mode(github, inputs), "promotion");
-	assert.equal(mode(github, { ...inputs, local_macos_release: "pi-native-local-macos-1.2.5" }), "local-macos");
+	assert.equal(mode(github, { ...inputs, local_macos_release: "450147883" }), "local-macos");
 	assert.equal(mode({ event_name: "push" }, { source_run_id: "", release_tag: "", local_macos_release: "" }), "tag");
 	const runs = release.steps.map((step) => step.run ?? "").join("\n");
-	assert.match(runs, /select\(\.draft == true\) \| \.target_commitish/);
-	assert.match(runs, /\[\[ "\$draft_source" == "\$RELEASE_SHA" \]\]/);
-	assert.match(runs, /gh release download "\$LOCAL_MACOS_RELEASE" --repo "\$GITHUB_REPOSITORY"/);
-	assert.match(runs, /--pattern build-metadata\.json --pattern build-metadata\.json\.sig/);
+	assert.match(runs, /gh api "repos\/\$GITHUB_REPOSITORY\/releases\/\$LOCAL_MACOS_RELEASE" > stage\/local-release\.json/);
+	assert.match(runs, /node scripts\/pi-native-local-build\.mjs --intake stage\/local-release\.json "\$LOCAL_MACOS_RELEASE" "\$RELEASE_SHA"/);
+	assert.match(runs, /releases\/assets\/\$asset_id" --header 'Accept: application\/octet-stream'/);
+	assert.match(runs, /done < stage\/local-assets\.txt/);
+	assert.doesNotMatch(runs, /releases\/tags\/\$LOCAL_MACOS_RELEASE/);
 	assert.match(runs, /gh api --paginate --slurp .*jobs\?filter=all&per_page=100/);
 	assert.match(runs, /cp stage\/darwin-arm64\/build-metadata\.json\.sig out\/release\/build-metadata-darwin-arm64\.json\.sig/);
 	assert.match(runs, /sha256sum build-metadata-darwin-arm64\.json\.sig/);

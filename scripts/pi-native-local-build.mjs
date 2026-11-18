@@ -67,7 +67,29 @@ export function verifyLocalMacosBuild(stage, expected, allowedSigners) {
 	return record;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+/** Bind a draft intake to its source and return only the three fixed-name uploaded assets. */
+export function validateLocalMacosIntake(release, releaseId, sourceSha) {
+	// GitHub's release response is wire input, including asset IDs and filenames.
+	assert.equal(String(release.id), releaseId, "Local macOS intake release ID mismatch");
+	assert.equal(release.draft, true, "Local macOS intake must be a draft");
+	assert.equal(release.target_commitish, sourceSha, "Local macOS intake source commit mismatch");
+	const names = ["pi-bolt-darwin-arm64-jit.tar.gz", "build-metadata.json", "build-metadata.json.sig"];
+	assert.equal(release.assets.length, names.length, "Local macOS intake must contain exactly three assets");
+	return names.map((name) => {
+		const matches = release.assets.filter((asset) => asset.name === name);
+		assert.equal(matches.length, 1, `Local macOS intake missing or duplicate ${name}`);
+		const asset = matches[0];
+		assert.ok(Number.isSafeInteger(asset.id) && asset.id > 0, "Invalid local macOS asset ID");
+		assert.equal(asset.state, "uploaded", `Local macOS asset is not uploaded: ${name}`);
+		return { id: asset.id, name };
+	});
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href && process.argv[2] === "--intake") {
+	const [releaseFile, releaseId, sourceSha] = process.argv.slice(3);
+	const assets = validateLocalMacosIntake(JSON.parse(readFileSync(releaseFile, "utf8")), releaseId, sourceSha);
+	for (const asset of assets) console.log(`${asset.id} ${asset.name}`);
+} else if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
 	const [stage, source, allowedSigners] = process.argv.slice(2);
 	const expected = {
 		repository: process.env.GITHUB_REPOSITORY,

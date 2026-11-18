@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { verifyLocalMacosBuild } from "./pi-native-local-build.mjs";
+import { validateLocalMacosIntake, verifyLocalMacosBuild } from "./pi-native-local-build.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const namespace = "pi-bolt-native-build";
@@ -92,6 +92,49 @@ function fixture(t) {
 		},
 	};
 }
+
+describe("local macOS draft intake", () => {
+	function intake() {
+		return { id: 23, draft: true, target_commitish: "a".repeat(40), assets: [
+			{ id: 1, name: "pi-bolt-darwin-arm64-jit.tar.gz", state: "uploaded" },
+			{ id: 2, name: "build-metadata.json", state: "uploaded" },
+			{ id: 3, name: "build-metadata.json.sig", state: "uploaded" },
+		] };
+	}
+	test("returns exact uploaded asset IDs with fixed safe names", () => {
+		const record = intake();
+		assert.deepEqual(validateLocalMacosIntake(record, "23", record.target_commitish),
+			record.assets.map(({ id, name }) => ({ id, name })));
+	});
+	for (const [label, change] of [
+		["another release ID", (r) => { r.id = 24; }],
+		["published release", (r) => { r.draft = false; }],
+		["another source", (r) => { r.target_commitish = "b".repeat(40); }],
+		["branch rather than exact commit", (r) => { r.target_commitish = "pi-bolt"; }],
+		["missing asset", (r) => { r.assets.pop(); }],
+		["extra asset", (r) => { r.assets.push({ id: 4, name: "private.log", state: "uploaded" }); }],
+		["duplicate name", (r) => { r.assets[0].name = r.assets[1].name; }],
+		["unsafe name", (r) => { r.assets[0].name = "../../private"; }],
+		["invalid asset ID", (r) => { r.assets[0].id = "1; echo bad"; }],
+		["unfinished upload", (r) => { r.assets[0].state = "starter"; }],
+	]) {
+		test(`rejects ${label}`, () => {
+			const record = intake();
+			change(record);
+			assert.throws(() => validateLocalMacosIntake(record, "23", "a".repeat(40)));
+		});
+	}
+	test("CLI emits only validated asset IDs and fixed names", (t) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-local-intake-"));
+		t.after(() => rmSync(directory, { recursive: true, force: true }));
+		const record = intake();
+		const file = join(directory, "release.json");
+		writeFileSync(file, JSON.stringify(record));
+		const result = execFileSync(process.execPath, [join(root, "scripts/pi-native-local-build.mjs"),
+			"--intake", file, "23", record.target_commitish], { encoding: "utf8" });
+		assert.equal(result, record.assets.map(({ id, name }) => `${id} ${name}\n`).join(""));
+	});
+});
 
 describe("signed local macOS build", () => {
 	test("returns the verified signed record", (t) => {
