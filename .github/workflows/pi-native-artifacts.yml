@@ -134,6 +134,8 @@ jobs:
           test/pi-bolt-update-environment.test.ts test/pi-bolt-installer.test.ts
           test/pi-bolt-jit-hint.test.ts test/pi-bolt-mise.test.ts
           test/pi-bolt-scoop.test.ts test/pi-bolt-homebrew.test.ts
+          test/pi-bolt-launchers.test.ts test/pi-bolt-repair.test.ts
+          test/pi-bolt-doctor.test.ts
       - name: Terminal submission regressions
         working-directory: packages/tui
         run: node --test test/terminal.test.ts

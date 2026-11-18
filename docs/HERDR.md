@@ -126,6 +126,33 @@ The built-in reporter registers the exact transcript using
 `source: herdr:pi`. Only interactive sessions own the pane; print, RPC, JSON, and
 subagent runs do not. Competing Pi reporters remain suppressed.
 
+## Restore missing launchers
+
+If `pi-bolt` works but `pi` is missing, run:
+
+```sh
+pi-bolt repair
+pi --version
+```
+
+`repair` restores the installer's public launchers from the runtime already installed. It works offline, does not replace the
+runtime, and leaves real Pi commands and unrecognized launchers untouched. It does not change shell profiles or PATH. Run
+`rehash` in Zsh (or open a new terminal) if the shell still cannot find the restored command.
+
+`pi-bolt doctor --offline` reports launcher problems and whether the launchers' directory is on PATH. For a custom command
+directory, set `PIBOLT_BIN_DIR` to that directory when running repair. If `pi-bolt` itself is missing, invoke the installed
+runtime by its full path with `repair`, for example on Linux:
+
+```sh
+~/.pi-bolt/pi-bolt-linux-x64-jit/pi repair
+```
+
+If both launchers are missing from a custom installation, also set `PIBOLT_INSTALL` to its installation root.
+
+Repair is for installer-managed installations. For an installation owned by npm, Homebrew, Scoop or mise, restore its launchers
+with that package manager instead. Builds without the repair command can recreate the launchers by reinstalling the latest
+release with `pi-bolt update --self --force`; unlike repair, that downloads and replaces the runtime.
+
 ## Updates and verification
 
 Application update URLs point to **`saifymatteo/Pi-Bolt`**, not upstream. A

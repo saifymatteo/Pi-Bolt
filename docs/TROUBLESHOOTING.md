@@ -82,6 +82,17 @@ To rule a compiler optimization in or out of a problem, build with it off (each 
 **`pi-bolt: command not found` after installing.** `~/.local/bin` is not on your `PATH`. Add
 `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.
 
+**`pi` is missing but `pi-bolt` works, or an installer-created launcher is broken.** Run `pi-bolt repair`, then
+`pi --version`. Repair uses the installed runtime, works offline, and preserves real Pi commands and unrecognized files. It
+changes no shell profile or PATH. Run `rehash` in Zsh or open a new terminal if needed. `pi-bolt doctor --offline` distinguishes
+a missing or broken launcher from a command directory that is not on PATH.
+
+If `pi-bolt` is also missing, run the installed runtime by its full path with `repair`, for example
+`~/.pi-bolt/pi-bolt-linux-x64-jit/pi repair` on Linux. Set `PIBOLT_BIN_DIR` when restoring a custom command directory. Repair
+supports installer-managed installations only; use the owning package manager for npm, Homebrew, Scoop or mise installations.
+For older builds without repair, `pi-bolt update --self --force` reruns the release installer, downloading and replacing the
+runtime as well. See [Herdr recovery](HERDR.md#restore-missing-launchers).
+
 **`GLIBC_2.xx not found` or `No such file or directory` when starting.** The system is older than glibc 2.17, or a glibc
 build is on a musl system (Alpine). Pi-Bolt needs glibc 2.17 or later (CentOS 7, Debian 8, Ubuntu 14.04 and anything newer),
 or on musl its musl builds (`PIBOLT_VARIANT` x64-musl, x64-musl-baseline or x64-musl-jit, which the installer picks there by

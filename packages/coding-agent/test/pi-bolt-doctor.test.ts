@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,7 @@ import {
 } from "../src/cli/doctor.ts";
 import type * as PiBoltModule from "../src/pi-bolt.ts";
 import { PIBOLT_RELEASE_KEY, type PiBoltBuild } from "../src/pi-bolt.ts";
+import { repairPiBoltLaunchers } from "../src/pi-bolt-launchers.ts";
 
 const build = vi.hoisted(() => ({ value: undefined as PiBoltBuild | undefined }));
 vi.mock("../src/pi-bolt.ts", async (importOriginal) => {
@@ -392,6 +393,55 @@ describe("runDoctor", () => {
 		expect(output).not.toContain(home);
 		expect(output).not.toContain("ghp_");
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"detects missing installer launchers offline without repairing them",
+		async () => {
+			const originalExecPath = process.execPath;
+			const install = join(tempDir, "install");
+			const folder = join(install, "pi-bolt-linux-x64-jit");
+			const bin = join(tempDir, "launcher-bin");
+			mkdirSync(folder, { recursive: true });
+			writeFileSync(join(folder, "pi"), "#!/bin/sh\necho doctor-runtime\n", { mode: 0o755 });
+			vi.stubEnv("PIBOLT_INSTALL", install);
+			vi.stubEnv("PIBOLT_BIN_DIR", bin);
+			vi.stubEnv("PATH", "/usr/bin:/bin");
+			Object.defineProperty(process, "execPath", { value: join(folder, "pi"), configurable: true });
+			let output = "";
+			vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+				output += String(chunk);
+				return true;
+			});
+			try {
+				await runDoctor(["--offline"], { cwd: tempDir, agentDir: tempDir, extensionFactories: [] });
+				expect(output).toContain("pi-bolt launcher");
+				expect(output).toContain("pi launcher");
+				expect(output).toContain("missing (Launcher is missing.)");
+				expect(output).toContain("Run `pi-bolt repair`");
+				expect(output).toContain("does not edit PATH or profiles");
+				expect(existsSync(bin)).toBe(false);
+				expect(readFileSync(join(folder, "pi"), "utf8")).toContain("doctor-runtime");
+				expect(repairPiBoltLaunchers().launchers.map((launcher) => launcher.status)).toEqual([
+					"created",
+					"created",
+				]);
+				output = "";
+				vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+				await runDoctor(["--offline"], { cwd: tempDir, agentDir: tempDir, extensionFactories: [] });
+				expect(output).toContain("ok (Launcher is ready.)");
+				expect(output).toContain("(this Pi-Bolt)");
+				expect(output).not.toContain("not this Pi-Bolt");
+				expect(output).not.toContain("Run `pi-bolt repair`");
+				chmodSync(join(bin, "pi"), 0o644);
+				output = "";
+				await runDoctor(["--offline"], { cwd: tempDir, agentDir: tempDir, extensionFactories: [] });
+				expect(output).toContain("executable permissions restored");
+				expect(output).toContain("Run `pi-bolt repair`");
+			} finally {
+				Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+			}
+		},
+	);
 
 	it("refuses unknown arguments", async () => {
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});

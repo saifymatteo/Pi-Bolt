@@ -76,7 +76,7 @@ test("offline preparation, JIT on, native regressions and full-output archive ar
 	assert.match(scripts, /node --test scripts\/pi-native-artifacts\.test\.mjs scripts\/pi-native-provenance\.test\.mjs/);
 	const regressions = steps.find((step) => step.name === "Focused offline source regressions");
 	assert.equal(regressions["working-directory"], "packages/coding-agent");
-	for (const file of ["config-pi-identity", "herdr-extension", "pi-bolt-update-rollback", "pi-bolt-jit-hint"]) {
+	for (const file of ["config-pi-identity", "herdr-extension", "pi-bolt-update-rollback", "pi-bolt-jit-hint", "pi-bolt-launchers", "pi-bolt-repair", "pi-bolt-doctor"]) {
 		assert.ok(regressions.run.includes(`test/${file}.test.ts`));
 	}
 	assert.match(scripts, /node --test test\/terminal\.test\.ts/);

@@ -35,6 +35,7 @@ import { listModels } from "./cli/list-models.ts";
 import { loadMobileUiCommand } from "./cli/mobile-ui.lazy.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { loadRemoteControlSettingCommand } from "./cli/remote-control-setting.lazy.ts";
+import { runRepair } from "./cli/repair.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { COMMAND_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
@@ -636,6 +637,11 @@ export async function main(args: string[], options?: MainOptions) {
 	if (packageFlagError) {
 		console.error(chalk.red(packageFlagError));
 		process.exitCode = 1;
+		return;
+	}
+	// Launcher repair needs no settings, extensions, network, or working directory.
+	if (PIBOLT && args[0] === "repair") {
+		process.exitCode = runRepair(args.slice(1));
 		return;
 	}
 	ttiTrace("main.entered");

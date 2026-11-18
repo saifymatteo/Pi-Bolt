@@ -45,6 +45,7 @@ import {
 	piBoltPackageManager,
 	piBoltUpdateCommand,
 } from "../pi-bolt.ts";
+import { inspectPiBoltLaunchers } from "../pi-bolt-launchers.ts";
 import { findExecutableOnPath, spawnProcessSync } from "../utils/child-process.ts";
 import { getLatestPiRelease, isNewerPackageVersion } from "../utils/version-check.ts";
 
@@ -355,7 +356,15 @@ async function installSection(
 		if (others.length > 0) rows.push(["also there", others.join("\n")]);
 	}
 
-	const onPath = piBoltOnPath();
+	const launchers = PIBOLT ? inspectPiBoltLaunchers() : undefined;
+	const publicLauncher = launchers?.supported
+		? launchers.launchers.find((launcher) => launcher.name === "pi-bolt" && launcher.status === "ok")
+		: undefined;
+	const onPath = piBoltOnPath().map((entry) =>
+		launchers && publicLauncher && realpathOr(entry.path) === realpathOr(publicLauncher.path)
+			? { ...entry, real: launchers.runtime }
+			: entry,
+	);
 	const path = analyzePiBoltOnPath(onPath, self.folder, self.method);
 	if (!path.first) {
 		rows.push(["pi-bolt on PATH", "none"]);
@@ -380,6 +389,30 @@ async function installSection(
 			report.problems.push(
 				`\`pi-bolt\` on PATH is ${path.first.path} (${versionOf(path.first)}), not this Pi-Bolt (${self.executable}). Remove it or put this one's folder earlier on PATH.`,
 			);
+		}
+	}
+
+	if (launchers) {
+		if (launchers.supported) {
+			for (const launcher of launchers.launchers) {
+				rows.push([`${launcher.name} launcher`, `${launcher.path}: ${launcher.status} (${launcher.detail})`]);
+				if (launcher.status === "missing" || launcher.status === "broken" || launcher.status === "error") {
+					report.problems.push(`${launcher.name} launcher: ${launcher.detail}`);
+				}
+			}
+			if (launchers.launchers.some((launcher) => ["missing", "broken", "error"].includes(launcher.status))) {
+				report.suggestions.push(
+					"Run `pi-bolt repair` to restore installer-owned launchers offline; existing unrelated commands are preserved.",
+				);
+			}
+			rows.push(["launcher directory on PATH", launchers.onPath ? "yes" : `no: ${launchers.binDir}`]);
+			if (!launchers.onPath) {
+				report.problems.push(
+					`Launcher directory ${launchers.binDir} is not on PATH. Add it to your shell profile; \`pi-bolt repair\` does not edit PATH or profiles.`,
+				);
+			}
+		} else {
+			rows.push(["launcher repair", launchers.reason ?? "not supported"]);
 		}
 	}
 

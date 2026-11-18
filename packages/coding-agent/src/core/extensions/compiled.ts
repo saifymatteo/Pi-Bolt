@@ -49,13 +49,14 @@ export interface CompiledExtension extends CompiledExtensionSource {
 
 /**
  * The commands that start without the compiled-in extensions: those that report on or repair an installation (`pi-bolt
- * doctor`, `pi-bolt compile` in each of its forms, `pi-bolt update --rollback`). They run none of their code, whatever it does
- * (doctor lists the compiled-in ones without loading them).
+ * doctor`, `pi-bolt repair`, `pi-bolt compile` in each of its forms, `pi-bolt update --rollback`). They run none of their code,
+ * whatever it does (doctor lists the compiled-in ones without loading them).
  */
 export function startsWithoutCompiledExtensions(args: readonly string[]): boolean {
 	const [command, ...rest] = args;
 	return (
 		command === "doctor" ||
+		command === "repair" ||
 		command === "compile" ||
 		(command === "update" && (rest.includes("--rollback") || rest.includes("--background")))
 	);
