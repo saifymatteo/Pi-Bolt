@@ -4,11 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Successful run to promote (requires release_tag)
+        description: CI source run to promote (requires release_tag)
         required: false
         type: string
       release_tag:
         description: Existing pi-native version tag to publish (requires source_run_id)
+        required: false
+        type: string
+      local_macos_release:
+        description: Draft intake release for signed SSH-local macOS (requires both promotion inputs)
         required: false
         type: string
   push:
@@ -37,13 +41,17 @@ jobs:
         env:
           INPUT_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_LOCAL_MACOS_RELEASE: ${{ inputs.local_macos_release }}
         shell: bash
         run: |
-          if [[ -n "$INPUT_SOURCE_RUN_ID" || -n "$INPUT_RELEASE_TAG" ]]; then
+          if [[ -n "$INPUT_SOURCE_RUN_ID" || -n "$INPUT_RELEASE_TAG" || -n "$INPUT_LOCAL_MACOS_RELEASE" ]]; then
             [[ -n "$INPUT_SOURCE_RUN_ID" && -n "$INPUT_RELEASE_TAG" ]] || { echo 'source_run_id and release_tag must be supplied together' >&2; exit 1; }
             [[ "$INPUT_SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'source_run_id must be decimal' >&2; exit 1; }
             version_tag='^pi-native-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
             [[ "$INPUT_RELEASE_TAG" =~ $version_tag ]] || { echo 'release_tag must be a valid pi-native version tag' >&2; exit 1; }
+            if [[ -n "$INPUT_LOCAL_MACOS_RELEASE" ]]; then
+              [[ "$INPUT_LOCAL_MACOS_RELEASE" =~ ^pi-native-local-macos-[A-Za-z0-9._-]+$ ]] || { echo 'invalid local macOS intake tag' >&2; exit 1; }
+            fi
           fi
 
   artifacts:
@@ -120,7 +128,7 @@ jobs:
           exit $LASTEXITCODE
       - name: Workflow and packaging contracts
         run: |
-          node --test scripts/pi-native-artifacts.test.mjs scripts/pi-native-provenance.test.mjs
+          node --test scripts/pi-native-artifacts.test.mjs scripts/pi-native-provenance.test.mjs scripts/pi-native-local-build.test.mjs
           python scripts/pi-native-artifacts.test.py
           python scripts/pi-native-installer.test.py
       - name: Focused offline source regressions
@@ -194,7 +202,8 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       SOURCE_RUN_ID: ${{ inputs.source_run_id || github.run_id }}
-      RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '' && 'promotion' || 'tag' }}
+      LOCAL_MACOS_RELEASE: ${{ inputs.local_macos_release }}
+      RELEASE_MODE: ${{ inputs.local_macos_release != '' && 'local-macos' || (github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '' && 'promotion' || 'tag') }}
     steps:
       # The publisher helper may not exist in the older release tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,7 +216,7 @@ jobs:
           path: release-source
           persist-credentials: false
       - name: Provenance validator regressions
-        run: node --test scripts/pi-native-provenance.test.mjs
+        run: node --test scripts/pi-native-provenance.test.mjs scripts/pi-native-local-build.test.mjs
       - name: Record the immutable release source
         run: echo "RELEASE_SHA=$(git -C release-source rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Download source run metadata and all platform artifacts
@@ -217,7 +226,15 @@ jobs:
           mkdir -p stage/win32-x64 stage/darwin-arm64 stage/linux-x64
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > stage/source-run.json
           gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-win32-x64 --dir stage/win32-x64
-          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-darwin-arm64 --dir stage/darwin-arm64
+          if [[ -n "$LOCAL_MACOS_RELEASE" ]]; then
+            draft_source="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LOCAL_MACOS_RELEASE" --jq 'select(.draft == true) | .target_commitish')"
+            [[ "$draft_source" == "$RELEASE_SHA" ]] || { echo 'macOS intake must be a draft at the release source commit' >&2; exit 1; }
+            gh release download "$LOCAL_MACOS_RELEASE" --repo "$GITHUB_REPOSITORY" --dir stage/darwin-arm64 \
+              --pattern pi-bolt-darwin-arm64-jit.tar.gz --pattern build-metadata.json --pattern build-metadata.json.sig
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" > stage/source-jobs.json
+          else
+            gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-darwin-arm64 --dir stage/darwin-arm64
+          fi
           gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-linux-x64 --dir stage/linux-x64
       - name: Validate source run and all platform provenance
         run: node scripts/pi-native-provenance.mjs stage/source-run.json stage release-source "$RELEASE_MODE"
@@ -234,11 +251,17 @@ jobs:
           cp stage/win32-x64/build-metadata.json out/release/build-metadata-win32-x64.json
           cp stage/darwin-arm64/build-metadata.json out/release/build-metadata-darwin-arm64.json
           cp stage/linux-x64/build-metadata.json out/release/build-metadata-linux-x64.json
+          if [[ -n "$LOCAL_MACOS_RELEASE" ]]; then
+            cp stage/darwin-arm64/build-metadata.json.sig out/release/build-metadata-darwin-arm64.json.sig
+          fi
           # The updater's fetchSignedSums reads the version from the first line, and the installers and archives by name.
           version="${RELEASE_TAG#pi-native-v}"
           {
             echo "# pi-bolt $version"
             (cd out/release && sha256sum install.ps1 install.sh pi-bolt-win32-x64-jit.zip pi-bolt-darwin-arm64-jit.tar.gz pi-bolt-linux-x64-jit.tar.gz build-metadata-*.json)
+            if [[ -n "$LOCAL_MACOS_RELEASE" ]]; then
+              (cd out/release && sha256sum build-metadata-darwin-arm64.json.sig)
+            fi
           } > out/release/SHA256SUMS
       - name: Sign the checksums
         env:
@@ -259,6 +282,10 @@ jobs:
             echo ""
             echo "- Commit: $RELEASE_SHA"
             echo "- Source run: $SOURCE_RUN_ID"
+            echo "- Publisher commit: $GITHUB_SHA"
+            if [[ -n "$LOCAL_MACOS_RELEASE" ]]; then
+              echo "- macOS provenance: SSH-local, authenticated by the maintainer's signed build record (not an Actions build)."
+            fi
             echo "- Signed upstream engine: $PI_NATIVE_RUNTIME_TAG"
             echo ""
             echo "### Usage"

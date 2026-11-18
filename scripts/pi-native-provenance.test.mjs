@@ -52,6 +52,18 @@ function fixture() {
 	return { run, metadata, expected };
 }
 
+function localFixture() {
+	const data = fixture();
+	data.expected.mode = "local-macos";
+	data.run.conclusion = "failure";
+	data.metadata["darwin-arm64"] = { buildType: "ssh-local", sourceCommit: data.expected.sha };
+	const jobPages = ["win32-x64", "linux-x64"].map((platform) => ({ jobs: [{
+		name: `artifacts (${platform === "win32-x64" ? "windows-2025" : "ubuntu-24.04"}, ${platform})`,
+		run_id: 17, head_sha: data.expected.sha, run_attempt: 1, status: "completed", conclusion: "success",
+	}] }));
+	return { ...data, jobPages };
+}
+
 describe("native release provenance", () => {
 	test("promotes all three artifacts from successful attempts of the same source run", () => {
 		const { run, metadata, expected } = fixture();
@@ -161,8 +173,72 @@ describe("native release provenance", () => {
 				},
 			);
 			assert.match(output, /Verified all three platforms from source run 17/);
+			// The real publisher CLI must authenticate Mac bytes, not just accept a local-builder label.
+			writeFileSync(join(directory, "darwin-arm64", "build-metadata.json"), JSON.stringify({
+				buildType: "ssh-local", sourceCommit: expected.sha,
+			}));
+			const { jobPages } = localFixture();
+			for (const page of jobPages) page.jobs[0].head_sha = expected.sha;
+			writeFileSync(join(directory, "source-jobs.json"), JSON.stringify(jobPages));
+			assert.throws(() => execFileSync(process.execPath, [
+				join(root, "scripts/pi-native-provenance.mjs"), join(directory, "run.json"), directory, root, "local-macos",
+			], {
+				encoding: "utf8", stdio: "pipe",
+				env: { ...process.env, SOURCE_RUN_ID: expected.sourceRunId, RELEASE_TAG: expected.tag,
+					GITHUB_REPOSITORY: expected.repository, PI_NATIVE_RUNTIME_TAG: expected.runtimeTag },
+			}), /ssh-keygen/);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("local macOS promotion source provenance", () => {
+	for (const conclusion of ["success", "failure", "cancelled"]) {
+		test(`permits completed ${conclusion} only with both matching successful CI jobs across pages`, () => {
+			const { run, metadata, expected, jobPages } = localFixture();
+			run.conclusion = conclusion;
+			assert.doesNotThrow(() => validateReleaseProvenance(run, metadata, expected, jobPages));
+		});
+	}
+	for (const index of [0, 1]) {
+		for (const [field, value] of [
+			["run_id", 18], ["head_sha", "c".repeat(40)], ["run_attempt", 2],
+			["status", "in_progress"], ["conclusion", "failure"], ["conclusion", "skipped"], ["name", "other job"],
+		]) {
+			test(`rejects CI job ${index} with ${field}=${value}`, () => {
+				const { run, metadata, expected, jobPages } = localFixture();
+				jobPages[index].jobs[0][field] = value;
+				assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /no successful matching CI job/);
+			});
+		}
+		test(`rejects a missing CI platform job ${index}`, () => {
+			const { run, metadata, expected, jobPages } = localFixture();
+			jobPages[index].jobs = [];
+			assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /no successful matching CI job/);
+		});
+	}
+	test("rejects conflicting duplicate jobs in the selected attempt", () => {
+		const { run, metadata, expected, jobPages } = localFixture();
+		jobPages[0].jobs.push({ ...jobPages[0].jobs[0], conclusion: "failure" });
+		assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /must be unique/);
+	});
+	test("does not promote an active run or fabricate a CI macOS identity", () => {
+		const { run, metadata, expected, jobPages } = localFixture();
+		run.status = "in_progress";
+		assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /must be completed/);
+		run.status = "completed";
+		metadata["darwin-arm64"].buildType = "github-actions";
+		assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /local builder/);
+	});
+	test("rejects metadata that claims another successful job attempt", () => {
+		const { run, metadata, expected, jobPages } = localFixture();
+		metadata["linux-x64"].runAttempt = "2";
+		assert.throws(() => validateReleaseProvenance(run, metadata, expected, jobPages), /no successful matching CI job/);
+	});
+	test("rejects unknown provenance modes", () => {
+		const { run, metadata, expected } = fixture();
+		expected.mode = "unchecked";
+		assert.throws(() => validateReleaseProvenance(run, metadata, expected), /Unknown provenance mode/);
 	});
 });

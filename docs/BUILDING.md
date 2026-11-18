@@ -60,7 +60,8 @@ The smoke check uses a local fake model, not provider credentials.
 
 This fork's Linux release target is x86-64 glibc only; the broader Linux targets described
 below belong to the upstream build tooling. Installation and Herdr behavior are
-covered in [HERDR.md](HERDR.md).
+covered in [HERDR.md](HERDR.md). The fork can also publish an explicitly authenticated
+[private macOS build](LOCAL_MACOS_RELEASE.md) without registering a GitHub runner.
 
 ## Building the runtime
 

@@ -131,8 +131,9 @@ test("a pi-native-v* tag publishes all three archives and metadata as a signed r
 
 test("manual promotion validates paired inputs before downloads and isolates concurrency from branch builds", () => {
 	assert.deepEqual(workflow.on.workflow_dispatch.inputs, {
-		source_run_id: { description: "Successful run to promote (requires release_tag)", required: false, type: "string" },
+		source_run_id: { description: "CI source run to promote (requires release_tag)", required: false, type: "string" },
 		release_tag: { description: "Existing pi-native version tag to publish (requires source_run_id)", required: false, type: "string" },
+		local_macos_release: { description: "Draft intake release for signed SSH-local macOS (requires both promotion inputs)", required: false, type: "string" },
 	});
 	const validation = workflow.jobs["validate-inputs"];
 	assert.equal(validation.if, "github.repository == 'saifymatteo/Pi-Bolt'");
@@ -140,6 +141,7 @@ test("manual promotion validates paired inputs before downloads and isolates con
 	assert.deepEqual(step.env, {
 		INPUT_SOURCE_RUN_ID: "${{ inputs.source_run_id }}",
 		INPUT_RELEASE_TAG: "${{ inputs.release_tag }}",
+		INPUT_LOCAL_MACOS_RELEASE: "${{ inputs.local_macos_release }}",
 	});
 	for (const [run, tag, valid] of [
 		["", "", true], ["43876196743", "pi-native-v1.2.3", true],
@@ -152,7 +154,7 @@ test("manual promotion validates paired inputs before downloads and isolates con
 		["1", "pi-native-v1.2.3; echo bad", false],
 	]) {
 		const execute = () => execFileSync("bash", ["-e", "-c", step.run], {
-			env: { ...process.env, INPUT_SOURCE_RUN_ID: run, INPUT_RELEASE_TAG: tag }, stdio: "pipe",
+			env: { ...process.env, INPUT_SOURCE_RUN_ID: run, INPUT_RELEASE_TAG: tag, INPUT_LOCAL_MACOS_RELEASE: "" }, stdio: "pipe",
 		});
 		if (valid) assert.doesNotThrow(execute, `${run} / ${tag}`);
 		else assert.throws(execute, `${run} / ${tag}`);
@@ -196,7 +198,8 @@ test("publisher uses the target tree, source run metadata and provenance before 
 	assert.deepEqual(release.env, {
 		RELEASE_TAG: "${{ inputs.release_tag || github.ref_name }}",
 		SOURCE_RUN_ID: "${{ inputs.source_run_id || github.run_id }}",
-		RELEASE_MODE: "${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '' && 'promotion' || 'tag' }}",
+		LOCAL_MACOS_RELEASE: "${{ inputs.local_macos_release }}",
+		RELEASE_MODE: "${{ inputs.local_macos_release != '' && 'local-macos' || (github.event_name == 'workflow_dispatch' && inputs.source_run_id != '' && inputs.release_tag != '' && 'promotion' || 'tag') }}",
 	});
 	const checkouts = release.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
 	assert.equal(checkouts.length, 2);
@@ -209,7 +212,7 @@ test("publisher uses the target tree, source run metadata and provenance before 
 		assert.ok(runs.includes(`gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pi-native-${platform} --dir stage/${platform}`));
 	}
 	const provenance = release.steps.findIndex((step) => step.run === 'node scripts/pi-native-provenance.mjs stage/source-run.json stage release-source "$RELEASE_MODE"');
-	const regressions = release.steps.findIndex((step) => step.run === "node --test scripts/pi-native-provenance.test.mjs");
+	const regressions = release.steps.findIndex((step) => step.run === "node --test scripts/pi-native-provenance.test.mjs scripts/pi-native-local-build.test.mjs");
 	assert.ok(regressions > 1 && regressions < provenance);
 	const sign = release.steps.findIndex((step) => step.name === "Sign the checksums");
 	const publish = release.steps.findIndex((step) => step.name === "Publish the release at this tag");
@@ -224,10 +227,47 @@ test("publisher uses the target tree, source run metadata and provenance before 
 	assert.match(runs, /echo "- Commit: \$RELEASE_SHA"/);
 	assert.match(runs, /echo "- Source run: \$SOURCE_RUN_ID"/);
 	assert.match(runs, /--verify-tag/);
-	assert.doesNotMatch(runs, /GITHUB_REF_NAME|GITHUB_SHA|GITHUB_RUN_ID|git tag|git push/);
+	assert.doesNotMatch(runs, /GITHUB_REF_NAME|GITHUB_RUN_ID|git tag|git push/);
+	assert.match(runs, /echo "- Publisher commit: \$GITHUB_SHA"/);
+	assert.equal(runs.match(/\$GITHUB_SHA/g).length, 1);
 	for (const step of release.steps) {
 		if (step.name !== "Sign the checksums") assert.doesNotMatch(JSON.stringify(step), /secrets\.|PI_NATIVE_RELEASE_KEY/);
 	}
+});
+
+test("local macOS intake is explicit, same-repository, authenticated before signing, and never a runner", () => {
+	const validation = workflow.jobs["validate-inputs"].steps[0];
+	for (const [run, tag, local, valid] of [
+		["17", "pi-native-v1.2.5", "pi-native-local-macos-1.2.5", true],
+		["", "", "pi-native-local-macos-1.2.5", false],
+		["17", "", "pi-native-local-macos-1.2.5", false],
+		["17", "pi-native-v1.2.5", "pi-native-v1.2.5", false],
+		["17", "pi-native-v1.2.5", "pi-native-local-macos-../bad", false],
+		["17", "pi-native-v1.2.5", "pi-native-local-macos-1;echo bad", false],
+	]) {
+		const execute = () => execFileSync("bash", ["-e", "-c", validation.run], {
+			env: { ...process.env, INPUT_SOURCE_RUN_ID: run, INPUT_RELEASE_TAG: tag, INPUT_LOCAL_MACOS_RELEASE: local }, stdio: "pipe",
+		});
+		if (valid) assert.doesNotThrow(execute);
+		else assert.throws(execute);
+	}
+	const release = workflow.jobs.release;
+	const mode = Function("github", "inputs", `return (${release.env.RELEASE_MODE.slice(3, -2)});`);
+	const github = { event_name: "workflow_dispatch" };
+	const inputs = { source_run_id: "17", release_tag: "pi-native-v1.2.5", local_macos_release: "" };
+	assert.equal(mode(github, inputs), "promotion");
+	assert.equal(mode(github, { ...inputs, local_macos_release: "pi-native-local-macos-1.2.5" }), "local-macos");
+	assert.equal(mode({ event_name: "push" }, { source_run_id: "", release_tag: "", local_macos_release: "" }), "tag");
+	const runs = release.steps.map((step) => step.run ?? "").join("\n");
+	assert.match(runs, /select\(\.draft == true\) \| \.target_commitish/);
+	assert.match(runs, /\[\[ "\$draft_source" == "\$RELEASE_SHA" \]\]/);
+	assert.match(runs, /gh release download "\$LOCAL_MACOS_RELEASE" --repo "\$GITHUB_REPOSITORY"/);
+	assert.match(runs, /--pattern build-metadata\.json --pattern build-metadata\.json\.sig/);
+	assert.match(runs, /gh api --paginate --slurp .*jobs\?filter=all&per_page=100/);
+	assert.match(runs, /cp stage\/darwin-arm64\/build-metadata\.json\.sig out\/release\/build-metadata-darwin-arm64\.json\.sig/);
+	assert.match(runs, /sha256sum build-metadata-darwin-arm64\.json\.sig/);
+	assert.match(runs, /macOS provenance: SSH-local.*not an Actions build/);
+	assert.doesNotMatch(source, /self-hosted|ForwardAgent|ssh-agent|config\.sh --url|\bssh mac\b/);
 });
 
 test("installers write the conditional pi takeover shim", () => {
