@@ -46,7 +46,7 @@ test("Windows x64, native macOS ARM64 and glibc Linux x64 build, with the reposi
 });
 
 test("upstream signed runtime is pinned and its original adjacent stamp gates every build", () => {
-	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.1.7");
+	assert.equal(workflow.env.PI_NATIVE_RUNTIME_TAG, "bolt-v1.3.0");
 	const unixRuntime = steps.find((step) => step.name === "Signed upstream runtime (Unix)");
 	assert.equal(unixRuntime.if, "runner.os != 'Windows'");
 	assert.equal(unixRuntime.run, 'bash scripts/fetch-runtime.sh --version "$PI_NATIVE_RUNTIME_TAG"');

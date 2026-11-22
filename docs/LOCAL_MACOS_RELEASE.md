@@ -47,7 +47,7 @@ The record must contain no `runId`, `runAttempt`, `ref` or `sha` CI claims.
   "boltVersion": "<VERSION>",
   "jit": "on",
   "runtimeRepository": "opensec-git/Pi-Bolt",
-  "runtimeTag": "bolt-v1.1.7",
+  "runtimeTag": "bolt-v1.3.0",
   "runtimeStamp": "<verified adjacent stamp>",
   "runtimeSha256": "<Bun checksum>",
   "archiveSha256": "<release archive checksum>",
@@ -69,7 +69,7 @@ After reviewing the actual build log, sign the record with the key pinned in
 
 ```bash
 ssh-keygen -Y sign -n pi-bolt-native-build -f /path/to/signing-key.pub build-metadata.json
-GITHUB_REPOSITORY=saifymatteo/Pi-Bolt PI_NATIVE_RUNTIME_TAG=bolt-v1.1.7 \
+GITHUB_REPOSITORY=saifymatteo/Pi-Bolt PI_NATIVE_RUNTIME_TAG=bolt-v1.3.0 \
   node scripts/pi-native-local-build.mjs /path/to/artifacts /path/to/release-checkout \
   keys/pi-native-local-build.allowed-signers
 ```

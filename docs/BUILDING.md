@@ -40,7 +40,7 @@ layout locally, use the signed upstream runtime tag pinned in
 
 ```bash
 export PIBOLT_WORK="$PWD/.work/linux-native"
-bash scripts/fetch-runtime.sh --version bolt-v1.1.7
+bash scripts/fetch-runtime.sh --version bolt-v1.3.0
 node scripts/pi-native-runtime.mjs "$PIBOLT_WORK/runtime/RUNTIME_STAMP"
 bash scripts/prepare-pi.sh
 bash scripts/build-pi.sh --jit on --out out/pi-native-linux-x64/runtime
