@@ -362,7 +362,7 @@ async function installSection(
 		: undefined;
 	const onPath = piBoltOnPath().map((entry) =>
 		launchers && publicLauncher && realpathOr(entry.path) === realpathOr(publicLauncher.path)
-			? { ...entry, real: launchers.runtime }
+			? { ...entry, real: realpathOr(launchers.runtime) }
 			: entry,
 	);
 	const path = analyzePiBoltOnPath(onPath, self.folder, self.method);
