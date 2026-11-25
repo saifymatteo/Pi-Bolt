@@ -14,21 +14,18 @@
  * take over the pane of the session that started them.
  *
  * With `pi-bolt --herdr-pi`, Pi-Bolt reports as Herdr's official Pi integration (`source=herdr:pi`, `agent=pi`)
- * explicitly; the fork's own builds do that without the flag, because their engine process is Pi-named by
- * construction (docs/HERDR.md), so stock Herdr sees its own integration in the pane. That identity reports its
- * session (`pane.report_agent_session`), which anchors Herdr's canonical Pi lifecycle, and restores with no
- * command of its own: Herdr runs its canonical `pi --session` plan, so no resume command is reported (a reliable
- * `pi-bolt` restart stays deferred). The plain `pi-bolt` identity, which Herdr has no plan for, reports
- * `pi-bolt --session` itself on every state report. Herdr only accepts the `herdr:pi`/`pi` pair from a pane whose
- * foreground process is named `pi` (its process table is fixed), so the flag re-execs Pi-Bolt with `pi` as its
- * command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt` rather than `pi`.
+ * instead, so Herdr records `agent_session` for `herdr agent list`. Restoring is the same either way: Herdr runs the resume
+ * command a report carries before its own plan, and the reported command still starts `pi-bolt`, with `--herdr-pi`. Herdr
+ * only accepts that pair from a pane whose foreground process is named `pi` (its process table is fixed), so the flag
+ * re-execs Pi-Bolt with `pi` as its command name (pi-name.ts); a display-only metadata report keeps the sidebar showing `Pi-Bolt`
+ * rather than `pi`.
  */
 
 import { isAbsolute } from "node:path";
 import { COMMAND_NAME, PRODUCT_NAME } from "../../config.ts";
 import type { ExtensionContext, ExtensionFactory } from "../../core/extensions/types.ts";
 import { isHerdrPi } from "./pi-name.ts";
-import { type HerdrRequest, type HerdrTransport, herdrFromEnvironment } from "./transport.ts";
+import { type HerdrAnswer, type HerdrRequest, type HerdrTransport, herdrFromEnvironment } from "./transport.ts";
 
 const SOURCE = "pi-bolt";
 const AGENT = "pi-bolt";
@@ -36,6 +33,9 @@ const PI_SOURCE = "herdr:pi";
 const PI_AGENT = "pi";
 
 type AgentState = "working" | "blocked" | "idle";
+
+/** A report to send, with or without the resume command; undefined once it is no longer wanted. */
+type Report = (withResume: boolean) => HerdrRequest | undefined;
 
 /**
  * pi-herdr (an extension that runs agents in Herdr panes) also reports this pane's state, as `pi`, and the last report holds
@@ -47,27 +47,46 @@ export function quietOtherHerdrReporters(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * Two tries; true when Herdr took the report. Each try gets its own seq: Herdr may have applied a try whose answer was
- * lost, and would then refuse the same seq again. `request` returns undefined once the report is no longer wanted.
+ * Herdr's answer to a report whose resume command it did not record because the reporter does not hold the pane. Herdr
+ * has applied the rest of the report by then (its state or session, under its own rules), so sending the same report
+ * again changes nothing.
  */
-async function send(transport: HerdrTransport, request: () => HerdrRequest | undefined): Promise<boolean> {
+const RESUME_NOT_ACCEPTED = "resume_not_accepted";
+
+/**
+ * How long a session's state reports go without the resume command after Herdr refused it. Herdr's answers do not say
+ * whether Pi-Bolt holds the pane, so the next state report after this offers the command again: at most one refused
+ * request per window, and a pane that became free gets its command within it.
+ */
+export const RESUME_RETRY_MS = 10 * 60 * 1000;
+
+/**
+ * Two tries; Herdr's last answer. Each try gets its own seq: Herdr may have applied a try whose answer was lost, and would
+ * then refuse the same seq again. A refused resume command is not tried again. `request` returns undefined once the
+ * report is no longer wanted.
+ */
+async function send(transport: HerdrTransport, request: () => HerdrRequest | undefined): Promise<HerdrAnswer> {
+	let answer: HerdrAnswer = { taken: false };
 	for (const timeoutMs of [500, 1500]) {
 		const next = request();
-		if (!next) return false;
-		if (await transport(next, timeoutMs)) return true;
+		if (!next) return { taken: false };
+		answer = await transport(next, timeoutMs);
+		if (answer.taken || answer.code === RESUME_NOT_ACCEPTED) return answer;
 	}
-	return false;
+	return answer;
 }
 
 /**
- * The command Herdr runs to reopen a session reported under the plain `pi-bolt` identity, which Herdr has no restore
- * plan for: `pi-bolt --session <file>`. Herdr refuses a report whose command has an apostrophe or a control character
- * in it or is over 8 KiB, so such a session gets no command (its state still reaches Herdr). The `pi` identity sends
- * no command: Herdr restores it with its own canonical `pi --session` plan.
+ * The command Herdr runs to reopen this session after a server restart: `pi-bolt --session <file>`, or with `--herdr-pi`
+ * in front when reporting as Herdr's Pi integration, so the restored process reports the same way. Herdr refuses a report
+ * whose command has an apostrophe or a control character in it or is over 8 KiB, so such a session gets no command (its
+ * state still reaches Herdr).
  */
-export function resumeArgv(sessionFile: string | undefined): string[] | undefined {
+export function resumeArgv(sessionFile: string | undefined, piIntegration = false): string[] | undefined {
 	if (!sessionFile || !isAbsolute(sessionFile)) return undefined;
-	const argv = [COMMAND_NAME, "--session", sessionFile];
+	const argv = piIntegration
+		? [COMMAND_NAME, "--herdr-pi", "--session", sessionFile]
+		: [COMMAND_NAME, "--session", sessionFile];
 	if (argv.some((arg) => arg.includes("'") || hasControlCharacter(arg))) return undefined;
 	if (argv.reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 8192) return undefined;
 	return argv;
@@ -86,6 +105,7 @@ export function createHerdrExtension(
 	env: NodeJS.ProcessEnv = process.env,
 	platform: NodeJS.Platform = process.platform,
 	reportsAsPi: () => boolean = isHerdrPi,
+	now: () => number = Date.now,
 ): ExtensionFactory {
 	return (pi) => {
 		const herdr = herdrFromEnvironment(env, platform);
@@ -103,10 +123,18 @@ export function createHerdrExtension(
 		let sessionFile: string | undefined;
 		let sessionId: string | undefined;
 		let agentActive = false;
+		let uiPrompt = false;
 		const blockedLabels: string[] = [];
 		const runningSubagents = new Set<string>();
 		let backgroundBusy = false;
 		let last: { state: AgentState; message?: string; sessionFile?: string } | undefined;
+		// The last time Herdr refused the resume command of a state report, and for which session file (#330). Only an
+		// answer changes it: a refusal sets it, a state report taken with the command clears it. A report without an
+		// answer (timeout, no socket) leaves it as it is.
+		let resumeRefusal: { sessionFile: string | undefined; at: number } | undefined;
+		function offerResume(file: string | undefined): boolean {
+			return !resumeRefusal || resumeRefusal.sessionFile !== file || now() - resumeRefusal.at >= RESUME_RETRY_MS;
+		}
 
 		function updateSession(ctx: ExtensionContext) {
 			try {
@@ -124,10 +152,9 @@ export function createHerdrExtension(
 		}
 
 		function desiredState(): { state: AgentState; message?: string } {
-			// UI prompts are not a blocked signal: pi-atelier hosts its sidebar as a persistent ui.custom overlay for the
-			// whole session, and stock Herdr's Pi integration never maps ui_prompt to blocked. Extensions that wait for the
-			// user say so on the herdr:blocked channel instead.
 			if (blockedLabels.length > 0) return { state: "blocked", message: blockedLabels[blockedLabels.length - 1] };
+			// A dialog during a run is a tool or extension waiting for the user; one opened at the prompt is the user's own.
+			if (uiPrompt && agentActive) return { state: "blocked" };
 			if (agentActive || backgroundBusy || runningSubagents.size > 0) return { state: "working" };
 			return { state: "idle" };
 		}
@@ -137,13 +164,27 @@ export function createHerdrExtension(
 		// session report goes first: Herdr only anchors a full-lifecycle source (herdr:pi) with a session_start_source,
 		// and state reports before that are ignored.
 		let inFlight = false;
-		let retryTimer: ReturnType<typeof setTimeout> | undefined;
-		let retryDelay = 1000;
-		let queued: { report: typeof last; request: () => HerdrRequest | undefined } | undefined;
-		let queuedSession: { request: () => HerdrRequest | undefined } | undefined;
+		let queued: { report: NonNullable<typeof last>; request: Report } | undefined;
+		let queuedSession: { request: Report } | undefined;
 		let sessionReported = false;
 		let metadataSent = false;
-		function sessionRequest(sessionStartSource?: string): HerdrRequest | undefined {
+
+		/**
+		 * Send a report, with the resume command when `withResume`; whether Herdr took it, and whether it refused the
+		 * command. Herdr records a command only from the source that holds the pane (#330): when another source's
+		 * session is on the pane, Herdr keeps the pane for it and answers resume_not_accepted. The report then goes once
+		 * more without the command, as the state report Herdr asks for: one refusal, never a loop.
+		 */
+		async function deliver(
+			request: Report,
+			withResume: boolean,
+		): Promise<{ taken: boolean; resumeRefused: boolean }> {
+			const answer = await send(transport, () => request(withResume));
+			if (answer.taken || answer.code !== RESUME_NOT_ACCEPTED) return { taken: answer.taken, resumeRefused: false };
+			return { taken: (await send(transport, () => request(false))).taken, resumeRefused: true };
+		}
+
+		function sessionRequest(withResume: boolean, sessionStartSource?: string): HerdrRequest | undefined {
 			if (!reporting) return undefined;
 			const sessionRef = sessionFile
 				? { agent_session_path: sessionFile }
@@ -151,8 +192,7 @@ export function createHerdrExtension(
 					? { agent_session_id: sessionId }
 					: undefined;
 			if (!sessionRef) return undefined;
-			// The `pi` identity restores through Herdr's canonical plan, so it reports no resume command.
-			const argv = piIntegration ? undefined : resumeArgv(sessionFile);
+			const argv = withResume ? resumeArgv(sessionFile, piIntegration) : undefined;
 			return {
 				method: "pane.report_agent_session",
 				params: {
@@ -174,7 +214,7 @@ export function createHerdrExtension(
 				sessionReported = true;
 				return;
 			}
-			queuedSession = { request: () => sessionRequest(sessionStartSource) };
+			queuedSession = { request: (withResume) => sessionRequest(withResume, sessionStartSource) };
 		}
 		// No try after session_shutdown, as for a state report: its seq would be above pane.release_agent's.
 		function metadataRequest(): HerdrRequest | undefined {
@@ -202,31 +242,23 @@ export function createHerdrExtension(
 						// Keep the session report first: without it the source is not anchored and state reports are ignored.
 						// One Herdr refuses (an older Herdr without pane.report_agent_session, or a validation error) must
 						// not hold back the state report behind it, or the sidebar stays empty: the state still goes, and
-						// the session report is tried again with the next one.
-						sessionReported = await send(transport, request);
+						// the session report is tried again with the next one. A refused resume command still goes with the
+						// state report after it, which is what makes a source hold the pane.
+						sessionReported = (await deliver(request, offerResume(sessionFile))).taken;
 						continue;
 					}
 					if (!queued) break;
 					const { report, request } = queued;
 					queued = undefined;
-					const sent = await send(transport, request);
+					const withResume = offerResume(report.sessionFile);
+					const delivered = await deliver(request, withResume);
+					if (delivered.resumeRefused) resumeRefusal = { sessionFile: report.sessionFile, at: now() };
+					else if (delivered.taken && withResume) resumeRefusal = undefined;
+					const sent = delivered.taken;
 					// The guards on the display name need the state report to have made `pi` the pane's agent first.
-					if (sent && piIntegration && !metadataSent) metadataSent = await send(transport, metadataRequest);
-					if (sent) {
-						retryDelay = 1000;
-					} else if (!queued && last === report) {
-						last = undefined;
-						// No more events may come (the failed one was the completion): retry on a timer, not only on
-						// the next publish, or Herdr shows a lost state forever.
-						if (reporting && !retryTimer) {
-							retryTimer = setTimeout(() => {
-								retryTimer = undefined;
-								publish();
-							}, retryDelay);
-							retryTimer.unref?.();
-							retryDelay = Math.min(retryDelay * 2, 30_000);
-						}
-					}
+					if (sent && piIntegration && !metadataSent)
+						metadataSent = (await send(transport, metadataRequest)).taken;
+					if (!sent && !queued && last === report) last = undefined;
 				}
 			} finally {
 				inFlight = false;
@@ -235,8 +267,6 @@ export function createHerdrExtension(
 
 		function publish(force = false, sessionStartSource?: string) {
 			if (!reporting) return;
-			clearTimeout(retryTimer);
-			retryTimer = undefined;
 			const next = { ...desiredState(), sessionFile };
 			const sessionChanged = last?.sessionFile !== next.sessionFile;
 			const needsSession = piIntegration && !sessionReported;
@@ -252,8 +282,7 @@ export function createHerdrExtension(
 			}
 			last = next;
 			if (piIntegration && (force || sessionChanged || !sessionReported)) queueSession(sessionStartSource);
-			// The `pi` identity restores through Herdr's canonical plan, so it reports no resume command.
-			const argv = piIntegration ? undefined : resumeArgv(sessionFile);
+			const argv = resumeArgv(sessionFile, piIntegration);
 			const params = {
 				pane_id: paneId,
 				source,
@@ -261,13 +290,17 @@ export function createHerdrExtension(
 				state: next.state,
 				...(next.message ? { message: next.message } : {}),
 				...(sessionFile ? { agent_session_path: sessionFile } : sessionId ? { agent_session_id: sessionId } : {}),
-				...(argv ? { resume_argv: argv } : {}),
 			};
 			queued = {
 				report: next,
 				// No try after session_shutdown: its seq would be above pane.release_agent's and take the pane back.
-				request: () =>
-					reporting ? { method: "pane.report_agent", params: { ...params, seq: nextSeq() } } : undefined,
+				request: (withResume) =>
+					reporting
+						? {
+								method: "pane.report_agent",
+								params: { ...params, ...(withResume && argv ? { resume_argv: argv } : {}), seq: nextSeq() },
+							}
+						: undefined,
 			};
 			void drain();
 		}
@@ -292,6 +325,16 @@ export function createHerdrExtension(
 		pi.on("agent_settled", (_event, ctx) => {
 			if (!reporting || !ctx.isIdle()) return;
 			agentActive = false;
+			publish();
+		});
+
+		pi.on("ui_prompt_start", () => {
+			uiPrompt = true;
+			publish();
+		});
+
+		pi.on("ui_prompt_end", () => {
+			uiPrompt = false;
 			publish();
 		});
 
@@ -337,8 +380,6 @@ export function createHerdrExtension(
 		pi.on("session_shutdown", async (event) => {
 			if (!reporting) return;
 			reporting = false;
-			clearTimeout(retryTimer);
-			retryTimer = undefined;
 			// Another session in this process (new, resume, fork) or a reload reports again from its session_start.
 			if (event.reason !== "quit") return;
 			queued = undefined;
